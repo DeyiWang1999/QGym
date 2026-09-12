@@ -512,7 +512,7 @@ class CustomPPOTrainer(PPO):
             
             dones = [False for _ in range(self.actors)]
 
-            # self.num_timesteps += env.num_envs
+            self.num_timesteps += self.actors
 
             # Give access to local variables
             callback.update_locals(locals())

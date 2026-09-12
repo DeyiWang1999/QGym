@@ -128,7 +128,7 @@ def main():
     test_policy = config['policy']['test_policy']
     # total steps
     total_steps = num_epochs * episode_steps * actors
-    eval_freq = episode_steps
+    eval_freq = episode_steps * 10
     # reward_scale = reward_scale / episode_steps
     test_T = env_config['test_T']
     print('env_config_test_T', test_T)

@@ -1,10 +1,15 @@
 import sys
+import copy
+import multiprocessing
+import os
+from concurrent.futures import ProcessPoolExecutor
+
+import cloudpickle
 sys.path.append('.../')
 from stable_baselines3 import PPO
 import numpy as np
 import torch
 from torch.nn import functional as F
-from tqdm import trange
 from typing import NamedTuple
 from stable_baselines3.common.callbacks import BaseCallback
 from torch.utils.data import Dataset, DataLoader
@@ -20,6 +25,50 @@ class EnvState(NamedTuple):
     time: torch.Tensor
     service_times: torch.Tensor
     arrival_times: torch.Tensor
+
+
+def _cpu_copy(obj):
+    """Copy tensor attributes too: policy constants are not all registered buffers."""
+    obj = copy.deepcopy(obj)
+    if isinstance(obj, torch.nn.Module):
+        obj.to('cpu')
+        modules = obj.modules()
+    else:
+        modules = [obj]
+    for module in modules:
+        for name, value in vars(module).items():
+            if isinstance(value, torch.Tensor):
+                setattr(module, name, value.detach().cpu())
+    return obj
+
+
+def _init_eval_worker(policy_bytes):
+    global _eval_policy
+    torch.set_num_threads(1)
+    torch.set_num_interop_threads(1)
+    _eval_policy = cloudpickle.loads(policy_bytes)
+    _eval_policy.set_training_mode(False)
+
+
+def _eval_trajectory(env_bytes, eval_t):
+    # Cloudpickle supports the local arrival/service functions stored in each env.
+    dq = cloudpickle.loads(env_bytes)
+    obs, state = dq.reset(seed=dq.seed)
+    total_cost = torch.tensor([[0.]])
+    time_weight_queue_len = torch.tensor([[0.]])
+    with torch.no_grad():
+        for _ in range(eval_t):
+            batch_queue = torch.as_tensor(obs)[0].reshape(dq.batch, -1)
+            raw_actions, _ = _eval_policy.predict(batch_queue)
+            action = torch.as_tensor(raw_actions, dtype=torch.float32)
+            _, _, _, _, info = dq.step(action[0])
+            obs, state = info['obs'], info['state']
+            total_cost = total_cost + info['cost']
+            time_weight_queue_len = (
+                time_weight_queue_len + info['queues'] * info['event_time']
+            )
+    # Return compact NumPy results rather than sharing worker-owned tensor storage.
+    return (total_cost.numpy(), time_weight_queue_len.numpy(), state.time.numpy())
 
 
 class BCD(Dataset):
@@ -137,11 +186,22 @@ class parallel_eval(BaseCallback):
                 self.model.policy.update_mean_std(mean_queue_length = q_mean, std_queue_length = q_std)
                 print(f"mean_queue_length: {self.model.policy.mean_queue_length}")
                 print(f"std_queue_length: {self.model.policy.std_queue_length}")
+
+                self.test_costs.append([
+                                    self.n_calls // self.eval_freq,
+                                    q_mean.item(),
+                                    q_std.item()
+                                ])
         else:
             if (self.n_calls) % self.eval_freq == 0:
-                self.eval()
-                print(f"mean_queue_length: {self.model.policy.mean_queue_length}")
-                print(f"std_queue_length: {self.model.policy.std_queue_length}")
+                q_mean, q_std, t_mean, t_max, t_min, t_std = self.eval()
+                print(f"mean_queue_length: {q_mean.item()}")
+                print(f"std_queue_length: {q_std.item()}")
+                self.test_costs.append([
+                                    self.n_calls // self.eval_freq,
+                                    q_mean.item(),
+                                    q_std.item()
+                                ])
 
         return True
     
@@ -150,37 +210,39 @@ class parallel_eval(BaseCallback):
         self.iter += 1
         print(f'iter: {self.iter}')
 
-        lex_batch, obs_batch, state_batch, total_cost_batch, time_weight_queue_len_batch = self.construct_batch()
+        if not self.eval_env:
+            raise ValueError('Evaluation requires at least one environment')
+        worker_count = min(48, os.cpu_count() or 1, len(self.eval_env))
+        policy_bytes = cloudpickle.dumps(_cpu_copy(self.model.policy))
+
+        def serialize_env(dq):
+            cpu_env = _cpu_copy(dq)
+            cpu_env.device = torch.device('cpu')
+            return cloudpickle.dumps(cpu_env)
+
+        # Spawn works on Windows and avoids inheriting training/CUDA thread state.
+        with ProcessPoolExecutor(
+            max_workers=worker_count,
+            mp_context=multiprocessing.get_context('spawn'),
+            initializer=_init_eval_worker,
+            initargs=(policy_bytes,),
+        ) as executor:
+            futures = [executor.submit(_eval_trajectory, serialize_env(dq), self.eval_t)
+                       for dq in self.eval_env]
+            results = [future.result() for future in futures]
+
+        # Keep input order and the original metric definitions.
+        total_cost_batch = [torch.as_tensor(result[0]) for result in results]
+        time_weight_queue_len_batch = [torch.as_tensor(result[1]) for result in results]
+        time_batch = [torch.as_tensor(result[2]) for result in results]
         test_dq_batch = self.eval_env
-
-        with torch.no_grad():
-            for tt in trange(self.eval_t):
-                # print(tt)
-                # print(f'---------------------')
-                # print(f'obs:')
-                # for obs in obs_batch:
-                #     print(f'{obs}')                
-                batch_queue = torch.cat([obs[0] for obs in obs_batch], dim = 0).reshape(self.test_batch,-1)
-                # print(f'batch_queue: {batch_queue}')
-
-                raw_actions, probs = self.model.predict(batch_queue)
-                action = torch.tensor(raw_actions).float().to(self.device)
-                
-                for test_dq_idx in range(len(test_dq_batch)):
-                    # step_time_start = time.time()
-                    _, _, _, _, info = test_dq_batch[test_dq_idx].step(action[test_dq_idx])
-                    # step_time_end = time.time()
-                    # print(f'step time: {step_time_end - step_time_start}')
-                    obs_batch[test_dq_idx], state_batch[test_dq_idx], cost, event_time  = info['obs'], info['state'], info['cost'], info['event_time']
-                    total_cost_batch[test_dq_idx] = total_cost_batch[test_dq_idx] + cost
-                    time_weight_queue_len_batch[test_dq_idx] = time_weight_queue_len_batch[test_dq_idx] + info['queues'] * info['event_time']
 
         # Test cost metrics
         # pdb.set_trace()
-        test_cost_batch = [total_cost_batch[test_dq_idx] / state_batch[test_dq_idx].time for test_dq_idx in range(len(test_dq_batch))]
+        test_cost_batch = [total_cost_batch[test_dq_idx] / time_batch[test_dq_idx] for test_dq_idx in range(len(test_dq_batch))]
         test_cost = torch.mean(torch.concat(test_cost_batch))
         test_std = torch.std(torch.concat(test_cost_batch))
-        test_queue_len = torch.mean(torch.concat([time_weight_queue_len_batch[test_dq_idx] / state_batch[test_dq_idx].time for test_dq_idx in range(len(test_dq_batch))]), dim = 0)
+        test_queue_len = torch.mean(torch.concat([time_weight_queue_len_batch[test_dq_idx] / time_batch[test_dq_idx] for test_dq_idx in range(len(test_dq_batch))]), dim = 0)
         test_queue_len = [float(_item) for _item in test_queue_len.to('cpu').detach().numpy().tolist()]
         
         print(f"queue lengths: \t{test_queue_len}")
@@ -192,10 +254,10 @@ class parallel_eval(BaseCallback):
 
         q_mean = torch.mean(test_queue_len)
         q_std = torch.std(test_queue_len)
-        t_mean = torch.mean(state_batch[0].time)
-        t_max = torch.max(state_batch[0].time)
-        t_min = torch.min(state_batch[0].time)
-        t_std = torch.std(state_batch[0].time)
+        t_mean = torch.mean(time_batch[0])
+        t_max = torch.max(time_batch[0])
+        t_min = torch.min(time_batch[0])
+        t_std = torch.std(time_batch[0])
         
         return q_mean, q_std, t_mean, t_max, t_min, t_std
 
