@@ -256,10 +256,13 @@ class parallel_eval(BaseCallback):
 
         q_mean = torch.mean(test_queue_len)
         q_std = torch.std(test_queue_len)
-        t_mean = torch.mean(time_batch[0])
-        t_max = torch.max(time_batch[0])
-        t_min = torch.min(time_batch[0])
-        t_std = torch.std(time_batch[0])
+        elapsed_times = torch.cat([elapsed.reshape(-1) for elapsed in time_batch])
+        t_mean = torch.mean(elapsed_times)
+        t_max = torch.max(elapsed_times)
+        t_min = torch.min(elapsed_times)
+        # Use sample std across trajectories; a single trajectory has no spread.
+        t_std = (torch.std(elapsed_times) if elapsed_times.numel() > 1
+                 else torch.zeros_like(t_mean))
         
         return q_mean, q_std, t_mean, t_max, t_min, t_std
 
