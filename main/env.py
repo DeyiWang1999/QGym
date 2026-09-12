@@ -172,7 +172,10 @@ class DiffDiscreteEventSystem(gym.Env):
         # print(queues)    
         ###TODO Changed
         if self.use_sb:
-            action = torch.tensor(action).float().to(self.device)
+            if isinstance(action, torch.Tensor):
+                action = action.detach().clone().to(dtype=torch.float32, device=self.device)
+            else:
+                action = torch.tensor(action, dtype=torch.float32, device=self.device)
             
         action = action * self.network
         

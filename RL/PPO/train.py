@@ -1,6 +1,17 @@
 import sys
 import os
 
+# Gym prints this notice directly to stderr on import, once per spawned worker.
+# Filter only that notice before any dependency imports Gym.
+try:
+    from gym_notices import notices as gym_notices
+except ImportError:
+    pass
+else:
+    for version, notice in list(gym_notices.notices.items()):
+        if notice.startswith('Gym has been unmaintained since 2022'):
+            del gym_notices.notices[version]
+
 project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 RL_root = os.path.join(project_root, 'RL')
 sys.path.append(project_root)
