@@ -58,7 +58,9 @@ def _eval_trajectory(env_bytes, eval_t):
     time_weight_queue_len = torch.tensor([[0.]])
     with torch.no_grad():
         for _ in range(eval_t):
-            batch_queue = torch.as_tensor(obs)[0].reshape(dq.batch, -1)
+            # reset() returns a queue array; step() returns Obs(queues, time).
+            # Select queues before conversion so the Obs tuple is never cast.
+            batch_queue = torch.as_tensor(obs[0]).reshape(dq.batch, -1)
             raw_actions, _ = _eval_policy.predict(batch_queue)
             action = torch.as_tensor(raw_actions, dtype=torch.float32)
             _, _, _, _, info = dq.step(action[0])
