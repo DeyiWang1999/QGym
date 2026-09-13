@@ -1,3 +1,8 @@
+import copy
+import multiprocessing
+from concurrent.futures import ProcessPoolExecutor
+
+import cloudpickle
 
 import numpy as np
 import torch as th
@@ -16,11 +21,102 @@ from gymnasium import spaces
 
 from stable_baselines3.common.base_class import BaseAlgorithm
 from stable_baselines3.common.buffers import DictRolloutBuffer, RolloutBuffer
-from stable_baselines3.common.callbacks import BaseCallback
+from stable_baselines3.common.callbacks import BaseCallback, CallbackList
 from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import obs_as_tensor, safe_mean
 from stable_baselines3.common.vec_env import VecEnv
+
+
+
+def _rollout_cpu_copy(obj):
+    """Include unregistered policy constants and nested environment tensors."""
+    def to_cpu(value):
+        if isinstance(value, th.Tensor):
+            return value.detach().cpu()
+        if isinstance(value, list):
+            return [to_cpu(item) for item in value]
+        if isinstance(value, tuple):
+            items = [to_cpu(item) for item in value]
+            return type(value)(*items) if hasattr(value, "_fields") else tuple(items)
+        if isinstance(value, dict):
+            return {key: to_cpu(item) for key, item in value.items()}
+        return value
+
+    obj = copy.deepcopy(obj)
+    if isinstance(obj, th.nn.Module):
+        obj.to("cpu")
+        objects = obj.modules()
+    else:
+        objects = [obj]
+    for item in objects:
+        for name, value in vars(item).items():
+            if isinstance(item, th.nn.Module) and name in {"_parameters", "_buffers", "_modules"}:
+                continue
+            if name == "device":
+                setattr(item, name, th.device("cpu"))
+            else:
+                setattr(item, name, to_cpu(value))
+    return obj
+
+
+def _init_rollout_worker(policy_bytes):
+    global _rollout_policy
+    th.set_num_threads(1)
+    th.set_num_interop_threads(1)
+    _rollout_policy = cloudpickle.loads(policy_bytes)
+    _rollout_policy.set_training_mode(False)
+    _rollout_policy.printing = False
+
+
+def _collect_actor_rollout(env_bytes, n_steps, use_sde, sde_sample_freq, seed,
+                           initial_obs, initial_episode_start):
+    """Collect a complete trajectory without per-step IPC or callbacks."""
+    th.manual_seed(seed)
+    np.random.seed(seed)
+    dq = cloudpickle.loads(env_bytes)
+    policy = _rollout_policy
+    # Preserve the original reset side effect while using the carried observation.
+    dq.reset(seed=dq.seed)
+    dq.reset_env_seed()
+    obs = np.asarray(initial_obs).reshape(dq.observation_space.shape)
+    episode_start = bool(initial_episode_start)
+    trajectory = []
+    if use_sde:
+        policy.reset_noise(1)
+    with th.no_grad():
+        for step in range(n_steps):
+            if use_sde and sde_sample_freq > 0 and step % sde_sample_freq == 0:
+                policy.reset_noise(1)
+            actions, values, log_probs = policy(th.as_tensor(obs).unsqueeze(0))
+            actions = actions.cpu().numpy()
+            clipped_actions = actions
+            # Use the policy's Gymnasium space; raw environments use legacy Gym.
+            if isinstance(policy.action_space, spaces.Box):
+                if policy.squash_output:
+                    clipped_actions = policy.unscale_action(actions)
+                else:
+                    clipped_actions = np.clip(actions, policy.action_space.low, policy.action_space.high)
+            new_obs, reward, terminated, truncated, info = dq.step(clipped_actions[0])
+            new_obs = np.asarray(new_obs).reshape(dq.observation_space.shape)
+            reward = float(np.asarray(reward).reshape(-1)[0])
+            # The original collector ignores termination and truncation flags.
+            done = False
+            trajectory.append((obs.copy(), actions[0].copy(), reward, episode_start,
+                               values.cpu().numpy().reshape(-1)[0],
+                               log_probs.cpu().numpy().reshape(-1)[0]))
+            obs, episode_start = new_obs, done
+        last_value = policy.predict_values(th.as_tensor(obs).unsqueeze(0)).item()
+    # NumPy results avoid shared tensor storage outliving a worker process.
+    return trajectory, obs, episode_start, last_value, cloudpickle.dumps(vars(dq))
+
+
+def _advance_rollout_callback(callback, skipped_steps):
+    callback.n_calls += skipped_steps
+    # SB3 wraps user callbacks in CallbackList (e.g. with a progress bar).
+    if isinstance(callback, CallbackList):
+        for child in callback.callbacks:
+            _advance_rollout_callback(child, skipped_steps)
 
 
 def cosine_lr_schedule(initial_lr, min_lr=1e-5, progress_remaining=1.0, warmup_proportion=0.03):
@@ -439,124 +535,70 @@ class CustomPPOTrainer(PPO):
         rollout_buffer: RolloutBuffer,
         n_rollout_steps: int,
     ) -> bool:
-        """
-        Collect experiences using the current policy and fill a ``RolloutBuffer``.
-        The term rollout here refers to the model-free notion and should not
-        be used with the concept of rollout used in model-based RL or planning.
+        """Collect actor trajectories on 48 local CPU processes.
 
-        :param env: The training environment
-        :param callback: Callback that will be called at each step
-            (and at the beginning and end of the rollout)
-        :param rollout_buffer: Buffer to fill with rollouts
-        :param n_rollout_steps: Number of experiences to collect per environment
-        :return: True if function returned with at least `n_rollout_steps`
-            collected, False if callback terminated rollout prematurely.
+        Each actor collects ``n_rollout_steps`` using a frozen CPU policy copy.
+        Actors beyond 48 are queued. The callback runs once after collection,
+        with its step counter advanced by the full rollout length.
         """
+        if n_rollout_steps <= 0:
+            raise ValueError("n_rollout_steps must be positive")
+        if self.raw_env is None or len(self.raw_env) != self.actors or self.actors < 1:
+            raise ValueError("raw_env must contain one environment per actor")
+        if env.num_envs != self.actors or rollout_buffer.n_envs != self.actors:
+            raise ValueError("Environment and rollout buffer counts must match actors")
+
         assert self._last_obs is not None, "No previous observation was provided"
-        # Switch to eval mode (this affects batch norm / dropout)
         self.policy.set_training_mode(False)
-
-        n_steps = 0
         rollout_buffer.reset()
-        # Sample new weights for the state dependent exploration
-        if self.use_sde:
-            self.policy.reset_noise(env.num_envs)
-
         callback.on_rollout_start()
-        # collect_roll_out_time_start = time.time()
-        lex_batch, obs_batch, state_batch, total_cost_batch, time_weight_queue_len_batch = self.construct_batch()
-        train_dq_batch = self.raw_env
-
-        for idx, env in enumerate(train_dq_batch):
-            env.reset_env_seed()    
-
-        print(f'n_rollout_steps: {n_rollout_steps}')
-        while n_steps < n_rollout_steps:
-            # start_time = time.time()
-            if self.use_sde and self.sde_sample_freq > 0 and n_steps % self.sde_sample_freq == 0:
-                # Sample a new noise matrix
-                self.policy.reset_noise(env.num_envs)
-
-            with th.no_grad():
-                # Convert to pytorch tensor or to TensorDict
-                self.policy.printing = False
-                obs_tensor = obs_as_tensor(self._last_obs, self.device)
-                actions, values, log_probs = self.policy(obs_tensor)
-                self.policy.printing = False
-            actions = actions.cpu().numpy()
-
-            # Rescale and perform action
-            clipped_actions = actions
-
-            if isinstance(self.action_space, spaces.Box):
-                if self.policy.squash_output:
-                    # Unscale the actions to match env bounds
-                    # if they were previously squashed (scaled in [-1, 1])
-                    clipped_actions = self.policy.unscale_action(clipped_actions)
-                else:
-                    # Otherwise, clip the actions to avoid out of bound error
-                    # as we are sampling from an unbounded Gaussian distribution
-                    clipped_actions = np.clip(actions, self.action_space.low, self.action_space.high)
-
-            # Rescale and perform action
-            batch_rewards = []
-            batch_obs = []
-            for train_dq_idx in range(len(train_dq_batch)):
-                new_obs, rewards, dones, truncated, _ = train_dq_batch[train_dq_idx].step(clipped_actions)
-                new_obs = new_obs.squeeze() 
-                batch_rewards.append(rewards)
-                batch_obs.append(new_obs)
-            rewards = np.array(batch_rewards)
-            new_obs = np.array(batch_obs)
-            rewards = rewards.squeeze()
-            
-            dones = [False for _ in range(self.actors)]
-
-            self.num_timesteps += self.actors
-
-            # Give access to local variables
-            callback.update_locals(locals())
-            if not callback.on_step():
-                return False
-
-            n_steps += 1
-
-            if isinstance(self.action_space, spaces.Discrete):
-                # Reshape in case of discrete action
-                actions = actions.reshape(-1, 1)
-
-            # print(f'enumerate_time: {enumerate_time_end - collect_time_end}')
-            rollout_buffer.add(
-                    self._last_obs,  # type: ignore[arg-type]
-                    actions,
-                    rewards,
-                    self._last_episode_starts,  # type: ignore[arg-type]
-                    values,
-                    log_probs,
+        policy_bytes = cloudpickle.dumps(_rollout_cpu_copy(self.policy))
+        seeds = np.random.randint(0, 2**32 - 1, size=self.actors, dtype=np.uint32)
+        # Spawn avoids inheriting CUDA state and works on Windows as well as Linux.
+        with ProcessPoolExecutor(
+            max_workers=48,
+            mp_context=multiprocessing.get_context("spawn"),
+            initializer=_init_rollout_worker,
+            initargs=(policy_bytes,),
+        ) as executor:
+            futures = [
+                executor.submit(
+                    _collect_actor_rollout,
+                    cloudpickle.dumps(_rollout_cpu_copy(dq)),
+                    n_rollout_steps, self.use_sde, self.sde_sample_freq,
+                    int(seeds[idx]), self._last_obs[idx], self._last_episode_starts[idx],
                 )
-            self._last_obs = new_obs  # type: ignore[assignment]
-            self._last_episode_starts = dones
-            # end_time = time.time()
+                for idx, dq in enumerate(self.raw_env)
+            ]
+            results = [future.result() for future in futures]
 
-            # print(f'collect_per_roll_out_time: {end_time - start_time}')
+        # Restore worker mutations in place so existing raw_env references see them.
+        for dq, result in zip(self.raw_env, results):
+            dq.__dict__.update(cloudpickle.loads(result[4]))
 
-        with th.no_grad():
-            # Compute value for the last timestep
-            
-            values = self.policy.predict_values(obs_as_tensor(new_obs, self.device))  # type: ignore[arg-type]
+        # Preserve the buffer's [step, actor] ordering regardless of finish order.
+        for n_steps in range(n_rollout_steps):
+            observations, actions, rewards, episode_starts, values, log_probs = (
+                np.stack(items) for items in zip(*(result[0][n_steps] for result in results))
+            )
+            rollout_buffer.add(
+                observations, actions, rewards, episode_starts,
+                th.as_tensor(values), th.as_tensor(log_probs),
+            )
+        self._last_obs = np.stack([result[1] for result in results])
+        dones = np.asarray([result[2] for result in results], dtype=bool)
+        self._last_episode_starts = dones
+        self.num_timesteps += n_rollout_steps * self.actors
+        values = th.as_tensor([result[3] for result in results])
+        returns_mean, returns_std = rollout_buffer.compute_returns_and_advantage(
+            last_values=values, dones=dones,
+        )
+        self.policy.update_rollout_stats(returns_mean, returns_std)
 
-        
-        dones = np.array(dones)
-        retunrs_mean, returns_std= rollout_buffer.compute_returns_and_advantage(last_values=values, dones=dones)
-        #print("update_rollout_stats for policy")
-        #print(f'returns_mean: {retunrs_mean} returns_std: {returns_std}')
-        self.policy.update_rollout_stats(retunrs_mean, returns_std)
-
+        n_steps = n_rollout_steps
+        _advance_rollout_callback(callback, n_rollout_steps - 1)
         callback.update_locals(locals())
-
+        if not callback.on_step():
+            return False
         callback.on_rollout_end()
-        # collect_roll_out_time_end = time.time()
-
-        # print(f'collect_roll_out_time: {collect_roll_out_time_end - collect_roll_out_time_start}')
-
-        return True 
+        return True
