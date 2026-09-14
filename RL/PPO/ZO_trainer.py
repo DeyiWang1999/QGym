@@ -5,6 +5,7 @@ import math
 import multiprocessing as mp
 import os
 from concurrent.futures import ProcessPoolExecutor
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -15,6 +16,12 @@ from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 from RL.utils.rl_env import load_rl_p_env
 from main.env import Obs
+
+
+def log_progress(message):
+    """Print local wall-clock time, including UTC offset, without buffering."""
+    timestamp = datetime.now().astimezone().isoformat(sep=' ', timespec='seconds')
+    print(f'[{timestamp}] {message}', flush=True)
 
 
 class ZOPolicy(nn.Module):
@@ -259,6 +266,7 @@ class ZerothOrderTrainer:
 
     def pretrain(self):
         """vanilla_bc: uniform integer queues 0..100, softmax teacher, MSE/Adam."""
+        log_progress('Behavioral cloning started')
         bc = self.config['behavior_cloning']
         optimizer = torch.optim.Adam(self.policy.parameters(), lr=bc['learning_rate'])
         self.policy.train()
@@ -276,12 +284,15 @@ class ZerothOrderTrainer:
                 optimizer.step()
         self.policy.eval()
         torch.save(self.policy.state_dict(), self.output_dir / 'initial_policy.pt')
+        log_progress(f'Behavioral cloning finished; initial policy saved to {self.output_dir / "initial_policy.pt"}')
 
     def train(self):
         self.pretrain()
         pool = ProcessPoolExecutor(self.workers, mp_context=mp.get_context('spawn')) if self.workers > 1 else None
         try:
             for iteration in range(self.training['total_iterations']):
+                label = f"Training iteration {iteration + 1}/{self.training['total_iterations']}"
+                log_progress(f'{label} in progress')
                 distance = perturbation_distance(self.training, iteration)
                 base = parameters_to_vector(self.policy.parameters()).detach().clone()
                 torch.save({'iteration': iteration, 'policy_state_dict': self.policy.state_dict(),
@@ -316,7 +327,7 @@ class ZerothOrderTrainer:
                               scores=scores, accepted=accepted)
                 with (self.output_dir / 'history.jsonl').open('a') as stream:
                     stream.write(json.dumps(record) + '\n')
-                print(record, flush=True)
+                log_progress(f'{label} finished: {record}')
             torch.save(self.policy.state_dict(), self.output_dir / 'final_policy.pt')
         finally:
             if pool:

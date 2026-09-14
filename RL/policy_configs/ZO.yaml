@@ -23,7 +23,7 @@ training:
   perturbation_seed: 100
   partition_count: 2 # Floor-sized partitions; all remaining parameters go in the last.
   evaluation_trajectories: 10
-  evaluation_length: 100000 # External arrivals, not total simulator events.
+  evaluation_length: 30000 # External arrivals, not total simulator events.
   evaluation_seeds: null # Consecutive distinct seeds starting at env.test_seed.
   initial_queues: null # Optional list of queue vectors, one per trajectory.
   update_ratio: 0.2
