@@ -70,7 +70,10 @@ class EventRecorder(nn.Module):
 
     def forward(self, times):
         self.index = int(times.argmin())
-        return self.original(times)
+        # ZO evaluation needs an exact event, not a differentiable surrogate.
+        # The base softmax surrogate produces NaNs for infinite disabled clocks.
+        return F.one_hot(torch.tensor(self.index, device=times.device),
+                         num_classes=times.shape[-1]).to(times.dtype)
 
 
 def make_environment(env_config, config, seed):
@@ -129,8 +132,14 @@ def paired_step(env, action):
     event = env.st_argmin.index
     if event < env.q:
         if env.zo_last_interarrivals is None:
-            raise ValueError('External arrival rows must add a job to a queue')
-        clocks[0, event] += env.zo_last_interarrivals[0, event]
+            if torch.count_nonzero(env.queue_event_options[event]) == 0:
+                # Some networks use tiny positive rates for disabled arrival
+                # rows. Their events add no jobs; disable the dummy clock.
+                clocks[0, event] = torch.inf
+            else:
+                raise ValueError('Nonzero external arrival row did not add a job')
+        else:
+            clocks[0, event] += env.zo_last_interarrivals[0, event]
     env.env_state = env.env_state._replace(arrival_times=clocks)
     return result
 
@@ -154,7 +163,9 @@ def evaluate_trajectory(job):
                 raise RuntimeError('Invalid event duration')
             integral += float(queues.sum()) * dt
             elapsed += dt
-            arrivals += int(env.st_argmin.index < env.q)
+            event = env.st_argmin.index
+            arrivals += int(event < env.q and
+                            bool((env.queue_event_options[event] > 0).any()))
     if elapsed <= 0:
         raise RuntimeError('Evaluation must have positive elapsed time')
     return integral / elapsed, copy.deepcopy(env.env_state)

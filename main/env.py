@@ -92,7 +92,7 @@ class DiffDiscreteEventSystem(gym.Env):
         self.mu = mu.repeat(batch,1,1).to(self.device)
         self.q = self.network.size()[-1]
         self.s = self.network.size()[-2]
-        self.h = torch.tensor(h).float().to(device)
+        self.h = torch.as_tensor(h, dtype=torch.float32, device=device).detach().clone()
         self.temp = temp
         self.st_argmin = STargmin(temp = self.temp)
         self.f_hook = f_hook

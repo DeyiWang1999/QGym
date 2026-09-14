@@ -54,6 +54,9 @@ has the same distribution as PPO, not identical RNG consumption from its critic.
   clocks (the base simulator does this). This is necessary for paired external
   arrival histories; the shared PPO simulator is not modified. Time-dependent
   rate functions still follow the existing loader's sampling convention.
+  Zero-change arrival rows (dummy events with tiny rates in some network
+  configs) are not counted as external arrivals; their clocks are disabled
+  after firing because they never add jobs.
 - The objective is the time integral of the **sum** of queue lengths divided by
   trajectory elapsed time, then the arithmetic mean across trajectories. Holding
   cost weights are not used. The event that reaches the arrival limit is included.
