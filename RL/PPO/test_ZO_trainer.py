@@ -12,7 +12,8 @@ from torch.nn.utils import parameters_to_vector
 
 from RL.PPO.ZO_trainer import (ZOPolicy, ZerothOrderTrainer, evaluate_trajectory,
                                install_streams, make_environment, paired_step,
-                               parameter_partitions, perturbation_distance)
+                               parameter_partitions, perturbation_distance,
+                               pack_state, unpack_state, evaluate_packed_trajectory)
 
 
 class ZOTests(unittest.TestCase):
@@ -103,13 +104,14 @@ class ZOTests(unittest.TestCase):
             n = len(trainer.seeds)
             calls = []
 
-            def fake(job):
+            def fake(job, *, return_state=True):
                 index = len(calls)
                 calls.append(copy.deepcopy(job[3]))
                 candidate = (index // n) % (len(trainer.partitions)+1)
                 state = copy.deepcopy(job[3])
                 return (10. if candidate == 0 else (9. if candidate == 1 else 11.),
-                        state._replace(time=state.time + (1 if candidate == 0 else 100)))
+                        state._replace(time=state.time + (1 if candidate == 0 else 100))
+                        if return_state else None)
 
             with patch.object(trainer, 'pretrain'), patch('RL.PPO.ZO_trainer.evaluate_trajectory', side_effect=fake):
                 trainer.train()
@@ -130,6 +132,36 @@ class ZOTests(unittest.TestCase):
                 history = [json.loads(line) for line in (Path(temp)/'run/history.jsonl').read_text().splitlines()]
                 self.assertEqual(len(history), 2)
                 self.assertTrue((Path(temp)/'run/final_policy.pt').exists())
+
+    def test_packed_state_preserves_exact_continuation(self):
+        with tempfile.TemporaryDirectory() as temp:
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+            env = make_environment(self.env, self.config, 42)
+            env.reset(init_queues=torch.tensor([[0., 100.]]))
+            state = env.env_state
+            packed = pack_state(state)
+            restored = unpack_state(packed)
+            for name in ('queues', 'time', 'arrival_times'):
+                torch.testing.assert_close(getattr(restored, name), getattr(state, name),
+                                           rtol=0, atol=0)
+            for original_queue, restored_queue in zip(state.service_times, restored.service_times):
+                self.assertEqual(len(original_queue), len(restored_queue))
+                for original, restored_job in zip(original_queue, restored_queue):
+                    torch.testing.assert_close(original, restored_job, rtol=0, atol=0)
+            job = (self.env, self.config, trainer.policy, state, 42)
+            expected_score, expected = evaluate_trajectory(job)
+            packed_job = (self.env, self.config, trainer.policy, packed, 42)
+            score, ending = evaluate_packed_trajectory((*packed_job, True))
+            actual = unpack_state(ending)
+            self.assertEqual(score, expected_score)
+            for name in ('queues', 'time', 'arrival_times'):
+                torch.testing.assert_close(getattr(actual, name), getattr(expected, name),
+                                           rtol=0, atol=0)
+            next_job = (self.env, self.config, trainer.policy)
+            self.assertEqual(evaluate_trajectory((*next_job, actual, 43))[0],
+                             evaluate_trajectory((*next_job, expected, 43))[0])
+            self.assertEqual(evaluate_packed_trajectory((*packed_job, False)),
+                             (expected_score, None))
 
     def test_repository_reentrant_environment(self):
         path = Path(__file__).resolve().parents[2] / 'configs/env/reentrant_2.yaml'

@@ -49,6 +49,12 @@ has the same distribution as PPO, not identical RNG consumption from its critic.
 - CPU workers use spawn and one Torch thread each, bounded by configured CPUs,
   available CPUs, number of jobs, and 48. Server pool rows are expanded in the
   simulator consistently with PPO's expanded actor output.
+- Worker inputs and baseline ending states use NumPy arrays for transfer, with
+  service jobs stacked into one array per queue instead of sharing individual
+  Torch tensors. Queue order, dtypes, simulation time, and all residual clocks
+  are preserved. Only original-policy trajectories return ending states;
+  perturbed trajectories return scores only. Each original ending state still
+  becomes its corresponding trajectory's initial state in the next iteration.
 - Arrival/service streams are separated by source event and queue. A local
   evaluation adapter prevents internal routing from resetting external arrival
   clocks (the base simulator does this). This is necessary for paired external

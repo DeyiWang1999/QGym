@@ -4,6 +4,7 @@ import json
 import math
 import multiprocessing as mp
 import os
+import sys
 from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -15,7 +16,7 @@ from torch.nn import functional as F
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
 
 from RL.utils.rl_env import load_rl_p_env
-from main.env import Obs
+from main.env import EnvState, Obs
 
 
 def log_progress(message):
@@ -151,7 +152,35 @@ def paired_step(env, action):
     return result
 
 
-def evaluate_trajectory(job):
+def pack_state(state):
+    """Copy CPU state into NumPy arrays, avoiding per-job Torch IPC handles."""
+    def array(tensor):
+        return tensor.detach().cpu().numpy().copy()
+
+    return (array(state.queues), array(state.time),
+            [array(torch.stack(queue)) if queue else None
+             for queue in state.service_times], array(state.arrival_times))
+
+
+def unpack_state(packed):
+    """Restore every residual clock and queued service job without resampling."""
+    queues, time, services, arrivals = packed
+    return EnvState(torch.from_numpy(queues.copy()), torch.from_numpy(time.copy()),
+                    [list(torch.from_numpy(queue.copy()).unbind(0))
+                     if queue is not None else [] for queue in services],
+                    torch.from_numpy(arrivals.copy()))
+
+
+def evaluate_packed_trajectory(job):
+    """Only baseline evaluations return state across the process boundary."""
+    env_config, config, policy, packed, seed, keep_state = job
+    score, state = evaluate_trajectory(
+        (env_config, config, policy, unpack_state(packed), seed),
+        return_state=keep_state)
+    return score, pack_state(state) if keep_state else None
+
+
+def evaluate_trajectory(job, *, return_state=True):
     env_config, config, policy, initial_state, seed = job
     torch.set_num_threads(1)
     env = make_environment(env_config, config, seed)
@@ -175,7 +204,7 @@ def evaluate_trajectory(job):
                             bool((env.queue_event_options[event] > 0).any()))
     if elapsed <= 0:
         raise RuntimeError('Evaluation must have positive elapsed time')
-    return integral / elapsed, copy.deepcopy(env.env_state)
+    return integral / elapsed, copy.deepcopy(env.env_state) if return_state else None
 
 
 def perturbation_distance(training, iteration):
@@ -308,15 +337,17 @@ class ZerothOrderTrainer:
                     vector_to_parameters(candidate, policy.parameters())
                     policies.append(policy)
                     directions.append(direction)
-                jobs = [(self.env_config, self.config, policy, state, seed)
-                        for policy in policies for state, seed in zip(self.states, self.seeds)]
-                results = list(pool.map(evaluate_trajectory, jobs)) if pool else list(map(evaluate_trajectory, jobs))
+                packed_states = [pack_state(state) for state in self.states]
+                jobs = [(self.env_config, self.config, policy, state, seed, index == 0)
+                        for index, policy in enumerate(policies)
+                        for state, seed in zip(packed_states, self.seeds)]
+                results = list(pool.map(evaluate_packed_trajectory, jobs)) if pool else list(map(evaluate_packed_trajectory, jobs))
                 n = len(self.seeds)
                 scores = [float(np.mean([r[0] for r in results[i:i+n]]))
                           for i in range(0, len(results), n)]
                 if not all(math.isfinite(score) for score in scores):
                     raise RuntimeError('Nonfinite evaluation score')
-                self.states = [result[1] for result in results[:n]]
+                self.states = [unpack_state(result[1]) for result in results[:n]]
                 accepted = [score < scores[0] for score in scores[1:]]
                 updated = base.clone()
                 for part, direction, accept in zip(self.partitions, directions, accepted):
@@ -331,4 +362,6 @@ class ZerothOrderTrainer:
             torch.save(self.policy.state_dict(), self.output_dir / 'final_policy.pt')
         finally:
             if pool:
-                pool.shutdown(wait=True, cancel_futures=True)
+                # cancel_futures was added in Python 3.9.
+                options = {'cancel_futures': True} if sys.version_info >= (3, 9) else {}
+                pool.shutdown(wait=True, **options)
