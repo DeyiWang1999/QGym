@@ -1,0 +1,30 @@
+name: ZO
+env:
+  device: cpu
+  env_temp: 1.0
+  model_seed: 100
+  train_seed: 3003
+  test_seed: 42
+  randomize: false # Evaluation always uses deterministic argmax, regardless of this flag.
+model:
+  policy_name: WC
+  scale: 10
+behavior_cloning:
+  num_samples: 100000
+  batch_size: 100
+  epochs: 1
+  learning_rate: 0.0003
+training:
+  mode: vanilla # vanilla, partitioned, split_layer
+  total_iterations: 100
+  initial_perturbation: 0.1
+  ending_perturbation: 0.001
+  perturbation_scheduler: logarithmic # geometric decay; also linear or cosine
+  perturbation_seed: 100
+  partition_count: 2 # Floor-sized partitions; all remaining parameters go in the last.
+  evaluation_trajectories: 100
+  evaluation_length: 10000 # External arrivals, not total simulator events.
+  evaluation_seeds: null # Consecutive distinct seeds starting at env.test_seed.
+  initial_queues: null # Optional list of queue vectors, one per trajectory.
+  update_ratio: 1.0
+  max_cpus: 48
