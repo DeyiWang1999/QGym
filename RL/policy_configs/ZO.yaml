@@ -5,7 +5,7 @@ env:
   model_seed: 100
   train_seed: 42
   test_seed: 42
-  randomize: false # Evaluation always uses deterministic argmax, regardless of this flag.
+  randomize: true # Evaluations always sample actions, regardless of this flag.
 model:
   policy_name: WC
   scale: 10

@@ -35,6 +35,8 @@ class ZOPolicy(nn.Module):
         if not (self.network.sum(-1) > 0).all():
             raise ValueError('Each server must have at least one compatible queue')
         self.randomize = randomize
+        self.register_buffer('mean_queue_length', torch.tensor(0.))
+        self.register_buffer('std_queue_length', torch.tensor(1.))
         servers = original_servers or self.s
         widths = [self.q, scale * self.q,
                   scale * int(math.sqrt(self.q * servers)), scale * servers]
@@ -49,18 +51,25 @@ class ZOPolicy(nn.Module):
         nn.init.orthogonal_(self.action_net.weight, gain=0.01)
         nn.init.zeros_(self.action_net.bias)
 
+    def update_mean_std(self, mean_queue_length, std_queue_length):
+        self.mean_queue_length.copy_(torch.as_tensor(mean_queue_length))
+        self.std_queue_length.copy_(torch.as_tensor(std_queue_length))
+
+    def standardize_queues(self, queues):
+        return ((queues - self.mean_queue_length) / (self.std_queue_length + 1e-8)).float()
+
     def probabilities(self, queues):
         queues = queues.float().reshape(-1, self.q)
-        logits = self.action_net(self.policy_net(queues)).reshape(-1, self.s, self.q)
+        logits = self.action_net(self.policy_net(self.standardize_queues(queues))).reshape(-1, self.s, self.q)
         # Mask logits before softmax to avoid underflow leaving a busy server idle.
         allowed = (self.network > 0).unsqueeze(0) & (queues > 0).unsqueeze(1)
         allowed = torch.where(allowed.any(-1, keepdim=True), allowed,
                               (self.network > 0).unsqueeze(0))
         return logits.masked_fill(~allowed, -torch.inf).softmax(-1)
 
-    def act(self, queues, generator=None, *, deterministic=False):
+    def act(self, queues, generator=None, *, deterministic=None):
         probs = self.probabilities(queues)
-        if self.randomize and not deterministic:
+        if deterministic is False or (deterministic is None and self.randomize):
             indices = torch.multinomial(probs.reshape(-1, self.q), 1,
                                         generator=generator).reshape(-1, self.s)
         else:
@@ -196,10 +205,12 @@ def evaluate_trajectory(job, *, return_state=True):
     integral = elapsed = 0.0
     arrivals = 0
     policy.eval()
+    action_generator = torch.Generator().manual_seed(seed)
     with torch.no_grad():
         while arrivals < config['training']['evaluation_length']:
             queues = env.env_state.queues.clone()
-            _, _, _, _, info = paired_step(env, policy.act(queues, deterministic=True))
+            _, _, _, _, info = paired_step(
+                env, policy.act(queues, generator=action_generator, deterministic=False))
             dt = float(info['event_time'])
             if not math.isfinite(dt) or dt < 0:
                 raise RuntimeError(
@@ -214,6 +225,29 @@ def evaluate_trajectory(job, *, return_state=True):
     if elapsed <= 0:
         raise RuntimeError('Evaluation must have positive elapsed time')
     return integral / elapsed, copy.deepcopy(env.env_state) if return_state else None
+
+
+def evaluate_pretrain_trajectory(job):
+    """PPO WC pre-training evaluation: reset, test_T events, base simulator."""
+    env_config, config, policy, seed = job
+    torch.set_num_threads(1)
+    env = load_rl_p_env(copy.deepcopy(env_config), config['env']['env_temp'],
+                        1, seed, 'WC', torch.device('cpu'))
+    obs, state = env.reset(seed=env.seed)
+    queue_integrals = torch.tensor([[0.]])
+    action_generator = torch.Generator().manual_seed(seed)
+    policy.eval()
+    with torch.no_grad():
+        for _ in range(env_config['test_T']):
+            queues = torch.as_tensor(obs[0]).reshape(env.batch, -1)
+            action = policy.act(queues, generator=action_generator, deterministic=False)
+            _, _, _, _, info = env.step(action[0])
+            obs, state = info['obs'], info['state']
+            queue_integrals = queue_integrals + info['queues'] * info['event_time']
+    means = queue_integrals / state.time
+    if not torch.isfinite(means).all():
+        raise RuntimeError(f'Nonfinite pre-training evaluation for seed {seed}')
+    return means.numpy()
 
 
 def perturbation_ratio(training, iteration):
@@ -335,6 +369,7 @@ class ZerothOrderTrainer:
 
     def train(self):
         self.pretrain()
+        self.pre_train_eval()
         initial_parameters = parameters_to_vector(self.policy.parameters()).detach()
         para_maxima = [float(initial_parameters[part].abs().max()) for part in self.partitions]
         pool = ProcessPoolExecutor(self.workers, mp_context=mp.get_context('spawn')) if self.workers > 1 else None
@@ -389,3 +424,34 @@ class ZerothOrderTrainer:
                 # cancel_futures was added in Python 3.9.
                 options = {'cancel_futures': True} if sys.version_info >= (3, 9) else {}
                 pool.shutdown(wait=True, **options)
+
+    def pre_train_eval(self):
+        """Match parallel_eval.pre_train_eval's scalar queue statistics once."""
+        length = self.env_config['test_T']
+        if not isinstance(length, int) or length <= 0:
+            raise ValueError('env.test_T must be a positive integer')
+        # PPO train.py builds exactly 100 test environments, independently of
+        # its training actor count and of ZO's comparison trajectory count.
+        seed = self.config['env']['test_seed']
+        jobs = [(self.env_config, self.config, self.policy, s)
+                for s in range(seed, seed + 100)]
+        workers = min(48, self.training['max_cpus'], os.cpu_count() or 1, len(jobs))
+        log_progress(f'Pre-training evaluation started: 100 environments, {length} events each')
+        if workers > 1:
+            with ProcessPoolExecutor(workers, mp_context=mp.get_context('spawn')) as pool:
+                results = list(pool.map(evaluate_pretrain_trajectory, jobs))
+        else:
+            results = list(map(evaluate_pretrain_trajectory, jobs))
+        trajectory_means = torch.cat([torch.as_tensor(result) for result in results])
+        queue_means = trajectory_means.mean(dim=0)
+        # PPO uses the sample std ACROSS per-queue trajectory-averaged means,
+        # not the std of observations or a separate normalization per queue.
+        mean, std = queue_means.mean(), queue_means.std()
+        self.policy.update_mean_std(mean, std)
+        record = dict(environments=100, trajectory_events=length, first_seed=seed,
+                      queue_means=queue_means.tolist(), mean_queue_length=float(mean),
+                      std_queue_length=float(std),
+                      total_queue_mean=float(trajectory_means.sum(-1).mean()))
+        (self.output_dir / 'pretrain_evaluation.json').write_text(json.dumps(record) + '\n')
+        torch.save(self.policy.state_dict(), self.output_dir / 'initial_policy.pt')
+        log_progress(f'Pre-training evaluation finished: {record}')

@@ -20,7 +20,8 @@ cloning, all-zero bias partitions remain unperturbed in split-layer mode.
 
 The actor uses WC PPO's hidden widths, Tanh activations and orthogonal gains
 (sqrt(2) for hidden weights, 0.01 for output weights, zero biases). It has no
-critic, observation standardization, reward scaling, or parameter normalization.
+critic, reward scaling, or parameter normalization. Queue inputs use PPO WC's
+scalar observation standardization, fitted once after optional BC (see below).
 BC follows the rule in `RL/utils/eval.py` used by `vanilla_bc.yaml`: 100,000
 uniform integer queue vectors in [0,100], a queue-softmax WC teacher, MSE,
 Adam at 0.0003, one pass, batches of 100. Sampling batches directly avoids the
@@ -50,8 +51,10 @@ has the same distribution as PPO, not identical RNG consumption from its critic.
   independently sampled residual work and arrival clocks for each trajectory.
   Thus full initial states differ even when queue counts match. Set
   `training.initial_queues` to one vector per trajectory to customize counts too.
-- Evaluation always uses deterministic argmax actions, even if `env.randomize`
-  is true in a custom config. Ties select the first queue index. Logit masking ensures empty
+- Evaluation always samples actions from probabilities, even if `env.randomize`
+  is false in a custom config. Each trajectory has a separate Torch generator
+  seeded by its evaluation seed, shared across baseline/candidate comparisons
+  for reproducibility. Logit masking ensures empty
   queues cannot be selected when a compatible nonempty queue exists, including
   under extreme logits. Idle servers retain WC's compatible-queue fallback.
 - Partitions are contiguous in flattened PyTorch parameter order. Each has
@@ -84,10 +87,23 @@ has the same distribution as PPO, not identical RNG consumption from its critic.
 - The objective is the time integral of the **sum** of queue lengths divided by
   trajectory elapsed time, then the arithmetic mean across trajectories. Holding
   cost weights are not used. The event that reaches the arrival limit is included.
-- Immediately after behavioral cloning, `initial_policy.pt` saves the actor's
-  state dict before any zeroth-order updates, for reuse with
+- After optional behavioral cloning, pre-training evaluation matches PPO WC:
+  100 fresh base-simulator environments with consecutive seeds starting at
+  `env.test_seed`, each reset and run for the environment's `test_T` simulator
+  events (300,000 for reentrant_9). This stage uses the PPO simulator path,
+  without ZO's paired-clock adapters. The CPU cap still follows `max_cpus`.
+  Per-queue time averages are averaged across trajectories; their scalar mean
+  and sample standard deviation normalize inputs as `(queues - mean)/(std + 1e-8)`.
+  These statistics stay fixed throughout training, as in WC's default config,
+  and are saved as buffers in every policy checkpoint. Raw queues still determine
+  action feasibility. `pretrain_evaluation.json` records the statistics and budget.
+  This stage does not advance the ZO comparison states or change their configured
+  trajectory count and external-arrival horizon.
+- `initial_policy.pt` is first saved after optional cloning, then updated with
+  the fitted normalization before any zeroth-order updates, for reuse with
   `policy.load_state_dict(torch.load(path, weights_only=True))` on a matching
-  `ZOPolicy` architecture. This file is not overwritten during training.
+  `ZOPolicy` architecture. Older checkpoints without normalization buffers need
+  explicit migration before loading into this version.
 - Every pre-update original actor is saved as `original_000000.pt`, etc., with
   config, initial evaluation states, and resolved seeds. `final_policy.pt` saves
   the last updated actor; `history.jsonl` records scores and acceptance decisions.
