@@ -81,12 +81,15 @@ class EventRecorder(nn.Module):
         # ZO evaluation needs an exact event, not a differentiable surrogate.
         # The base softmax surrogate produces NaNs for infinite disabled clocks.
         return F.one_hot(torch.tensor(self.index, device=times.device),
-                         num_classes=times.shape[-1]).to(times.dtype)
+                         num_classes=times.shape[-1]).float()
 
 
 def make_environment(env_config, config, seed):
     env = load_rl_p_env(copy.deepcopy(env_config), config['env']['env_temp'],
                         1, seed, 'WC', torch.device('cpu'))
+    # Rounding the minimum clock to float32 can advance beyond another event
+    # and leave a negative residual clock for the next step.
+    env.event_time_dtype = torch.float64
     # PPO expands the actor's server rows; expand simulator rows consistently.
     pool = env_config['num_pool']
     env.network = env.network.repeat_interleave(pool, dim=1)
@@ -196,7 +199,10 @@ def evaluate_trajectory(job, *, return_state=True):
             _, _, _, _, info = paired_step(env, policy.act(queues, deterministic=True))
             dt = float(info['event_time'])
             if not math.isfinite(dt) or dt < 0:
-                raise RuntimeError('Invalid event duration')
+                raise RuntimeError(
+                    f'Invalid event duration: dt={dt!r}, seed={seed}, '
+                    f'arrivals={arrivals}, event={env.st_argmin.index}, '
+                    f'time={env.env_state.time.tolist()}')
             integral += float(queues.sum()) * dt
             elapsed += dt
             event = env.st_argmin.index

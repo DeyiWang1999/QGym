@@ -217,7 +217,8 @@ class DiffDiscreteEventSystem(gym.Env):
         
         
         # arrival times and service times are both q vectors
-        event_times = torch.cat((arrival_times, min_eff_service_times), dim=1).float()
+        event_times = torch.cat((arrival_times, min_eff_service_times), dim=1).to(
+            dtype=getattr(self, 'event_time_dtype', torch.float32))
 
         if self.f_verbose:
             print(f"service:\t\t{service_times}")
