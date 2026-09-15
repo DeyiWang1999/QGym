@@ -23,11 +23,20 @@ has the same distribution as PPO, not identical RNG consumption from its critic.
 
 ## Choices and defaults beyond the requested algorithm
 
-- Default mode: vanilla; 100 iterations; perturbations 0.1 down to 0.001;
+- Default mode: vanilla; 100 iterations; perturbation ratios 0.1 down to 0.01;
   update ratio 1; 100 trajectories of 10,000 external arrivals each.
-- `logarithmic` means linear interpolation of log(distance), i.e. geometric
+- `logarithmic` means linear interpolation of log(ratio), i.e. geometric
   decay. Linear and cosine schedules are also available. A one-iteration run
-  uses the initial distance.
+  uses the initial ratio.
+- Immediately after behavioral cloning, `para_max` is computed once as the
+  maximum absolute value of the initial policy parameters in each assigned
+  partition and remains fixed throughout training. That partition's
+  distance is the scheduled ratio times `para_max`; accepted updates use this
+  same distance times `update_ratio`. Vanilla uses the whole actor, and
+  split-layer uses each individual weight/bias tensor. An all-zero partition
+  has zero distance and remains unchanged. Distances change only with the
+  scheduled ratio, regardless of subsequent parameter updates. History records the
+  ratio, per-partition maxima, and actual distances.
 - Seeds: model/perturbations 100, train environment 3003, evaluation 42 onward.
   Evaluation seeds are reused across iterations; state, including residual
   service work, arrival clocks and absolute time, comes from the original policy.

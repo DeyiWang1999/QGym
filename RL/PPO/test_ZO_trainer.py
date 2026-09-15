@@ -12,7 +12,7 @@ from torch.nn.utils import parameters_to_vector
 
 from RL.PPO.ZO_trainer import (ZOPolicy, ZerothOrderTrainer, evaluate_trajectory,
                                install_streams, make_environment, paired_step,
-                               parameter_partitions, perturbation_distance,
+                               parameter_partitions, perturbation_ratio,
                                pack_state, unpack_state, evaluate_packed_trajectory)
 
 
@@ -39,8 +39,8 @@ class ZOTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             parameter_partitions(policy, 'partitioned', total+1)
         t = self.config['training']
-        self.assertAlmostEqual(perturbation_distance(t, 0), t['initial_perturbation'])
-        self.assertAlmostEqual(perturbation_distance(t, 1), t['ending_perturbation'])
+        self.assertAlmostEqual(perturbation_ratio(t, 0), t['initial_perturbation_ratio'])
+        self.assertAlmostEqual(perturbation_ratio(t, 1), t['ending_perturbation_ratio'])
 
     def test_work_conservation(self):
         policy = ZOPolicy([[1, 1]], scale=1)
@@ -121,6 +121,22 @@ class ZOTests(unittest.TestCase):
             torch.testing.assert_close(after[first.stop:], before[first.stop:])
             torch.testing.assert_close(trainer.states[0].time, initial_time+2)
             self.assertTrue((Path(temp)/'run/original_000001.pt').exists())
+            history = [json.loads(line) for line in (Path(temp)/'run/history.jsonl').read_text().splitlines()]
+            for iteration, record in enumerate(history):
+                checkpoint = torch.load(Path(temp)/f'run/original_{iteration:06d}.pt', weights_only=False)
+                baseline = copy.deepcopy(trainer.policy)
+                baseline.load_state_dict(checkpoint['policy_state_dict'])
+                vector = parameters_to_vector(baseline.parameters()).detach()
+                for part, maximum, distance in zip(trainer.partitions, record['para_maxima'], record['perturbation_distances']):
+                    self.assertAlmostEqual(maximum, float(before[part].abs().max()))
+                    self.assertAlmostEqual(distance, record['perturbation_ratio'] * maximum)
+                if iteration == 0:
+                    self.assertEqual(record['perturbation_distances'][1], 0.0)  # Zero bias.
+            last_base = vector
+            self.assertEqual(history[0]['para_maxima'], history[1]['para_maxima'])
+            self.assertNotEqual(float(last_base[first].abs().max()), history[1]['para_maxima'][0])
+            torch.testing.assert_close((after[first] - last_base[first]).abs(),
+                                       torch.full_like(after[first], history[-1]['perturbation_distances'][0] * 0.5))
 
     def test_all_modes_and_spawn(self):
         for mode in ('vanilla', 'partitioned', 'split_layer'):

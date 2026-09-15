@@ -216,8 +216,8 @@ def evaluate_trajectory(job, *, return_state=True):
     return integral / elapsed, copy.deepcopy(env.env_state) if return_state else None
 
 
-def perturbation_distance(training, iteration):
-    start, end = training['initial_perturbation'], training['ending_perturbation']
+def perturbation_ratio(training, iteration):
+    start, end = training['initial_perturbation_ratio'], training['ending_perturbation_ratio']
     fraction = iteration / max(training['total_iterations'] - 1, 1)
     scheduler = training['perturbation_scheduler']
     if scheduler == 'logarithmic':
@@ -257,11 +257,12 @@ class ZerothOrderTrainer:
         for key in ('total_iterations', 'evaluation_trajectories', 'evaluation_length', 'max_cpus'):
             if not isinstance(t[key], int) or t[key] <= 0:
                 raise ValueError(f'{key} must be a positive integer')
-        if not 0 < t['ending_perturbation'] <= t['initial_perturbation']:
-            raise ValueError('Require 0 < ending_perturbation <= initial_perturbation')
+        if not (0 < t['ending_perturbation_ratio'] <= t['initial_perturbation_ratio']
+                and math.isfinite(t['initial_perturbation_ratio'])):
+            raise ValueError('Require finite 0 < ending_perturbation_ratio <= initial_perturbation_ratio')
         if not math.isfinite(t['update_ratio']) or t['update_ratio'] < 0:
             raise ValueError('update_ratio must be finite and nonnegative')
-        perturbation_distance(t, 0)
+        perturbation_ratio(t, 0)
         bc = config['behavior_cloning']
         for key in ('epochs', 'num_samples', 'batch_size'):
             if not isinstance(bc[key], int) or bc[key] <= 0:
@@ -326,19 +327,24 @@ class ZerothOrderTrainer:
 
     def train(self):
         self.pretrain()
+        initial_parameters = parameters_to_vector(self.policy.parameters()).detach()
+        para_maxima = [float(initial_parameters[part].abs().max()) for part in self.partitions]
         pool = ProcessPoolExecutor(self.workers, mp_context=mp.get_context('spawn')) if self.workers > 1 else None
         try:
             for iteration in range(self.training['total_iterations']):
                 label = f"Training iteration {iteration + 1}/{self.training['total_iterations']}"
                 log_progress(f'{label} in progress')
-                distance = perturbation_distance(self.training, iteration)
+                ratio = perturbation_ratio(self.training, iteration)
                 base = parameters_to_vector(self.policy.parameters()).detach().clone()
                 torch.save({'iteration': iteration, 'policy_state_dict': self.policy.state_dict(),
                             'config': self.config, 'env_config': self.env_config,
                             'initial_states': self.states, 'evaluation_seeds': self.seeds},
                            self.output_dir / f'original_{iteration:06d}.pt')
                 policies, directions = [copy.deepcopy(self.policy)], []
-                for part in self.partitions:
+                distances = []
+                for part, para_max in zip(self.partitions, para_maxima):
+                    distance = ratio * para_max
+                    distances.append(distance)
                     direction = torch.randint(0, 2, (part.stop - part.start,), generator=self.generator).float() * 2 - 1
                     candidate = base.clone()
                     candidate[part] += distance * direction
@@ -359,11 +365,12 @@ class ZerothOrderTrainer:
                 self.states = [unpack_state(result[1]) for result in results[:n]]
                 accepted = [score < scores[0] for score in scores[1:]]
                 updated = base.clone()
-                for part, direction, accept in zip(self.partitions, directions, accepted):
+                for part, direction, accept, distance in zip(self.partitions, directions, accepted, distances):
                     if accept:
                         updated[part] += self.training['update_ratio'] * distance * direction
                 vector_to_parameters(updated, self.policy.parameters())
-                record = dict(iteration=iteration, perturbation_distance=distance,
+                record = dict(iteration=iteration, perturbation_ratio=ratio,
+                              para_maxima=para_maxima, perturbation_distances=distances,
                               scores=scores, accepted=accepted)
                 with (self.output_dir / 'history.jsonl').open('a') as stream:
                     stream.write(json.dumps(record) + '\n')
