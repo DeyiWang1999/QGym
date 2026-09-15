@@ -10,10 +10,11 @@ model:
   policy_name: WC
   scale: 10
 behavior_cloning:
+  enabled: false # Set false to start ZO directly from the initialized actor.
   num_samples: 100000
   batch_size: 100
   epochs: 1
-  learning_rate: 0
+  learning_rate: 0.0003
 training:
   mode: split_layer # vanilla, partitioned, split_layer
   total_iterations: 100

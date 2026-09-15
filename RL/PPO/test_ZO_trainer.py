@@ -48,6 +48,20 @@ class ZOTests(unittest.TestCase):
         torch.testing.assert_close(probs, torch.tensor([[[0., 1.]], [[1., 0.]]]))
         self.assertFalse(any('value' in name for name, _ in policy.named_parameters()))
 
+    def test_behavior_cloning_can_be_disabled(self):
+        self.config['behavior_cloning'] = {'enabled': False}
+        with tempfile.TemporaryDirectory() as temp:
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+            initial = copy.deepcopy(trainer.policy.state_dict())
+            with patch('torch.optim.Adam', side_effect=AssertionError('Cloning must not run')):
+                trainer.train()
+            saved = torch.load(Path(temp)/'run/initial_policy.pt', weights_only=True)
+            for key in initial:
+                torch.testing.assert_close(saved[key], initial[key], rtol=0, atol=0)
+            history = [json.loads(line) for line in (Path(temp)/'run/history.jsonl').read_text().splitlines()]
+            self.assertEqual(len(history), 2)
+            self.assertEqual(history[0]['para_maxima'], history[1]['para_maxima'])
+
     def test_partition_remainder_goes_to_last(self):
         policy = torch.nn.Linear(98, 1)  # 98 weights + one bias.
         parts = parameter_partitions(policy, 'partitioned', 5)

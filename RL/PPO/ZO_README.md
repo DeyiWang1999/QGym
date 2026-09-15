@@ -12,6 +12,12 @@ accept config names or absolute YAML paths. `--output-dir` selects a new output
 directory; otherwise the directory is `RL/PPO/<network_name>`, for example
 `RL/PPO/reentrant_2`.
 
+Set `behavior_cloning.enabled: false` to skip behavioral cloning (default: true,
+including configs that omit the switch). The randomly initialized actor is
+still saved as `initial_policy.pt`, and its partition maxima are fixed for the
+whole run. A timestamped message reports that cloning is disabled. With no
+cloning, all-zero bias partitions remain unperturbed in split-layer mode.
+
 The actor uses WC PPO's hidden widths, Tanh activations and orthogonal gains
 (sqrt(2) for hidden weights, 0.01 for output weights, zero biases). It has no
 critic, observation standardization, reward scaling, or parameter normalization.

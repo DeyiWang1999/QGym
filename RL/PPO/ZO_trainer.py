@@ -264,11 +264,14 @@ class ZerothOrderTrainer:
             raise ValueError('update_ratio must be finite and nonnegative')
         perturbation_ratio(t, 0)
         bc = config['behavior_cloning']
-        for key in ('epochs', 'num_samples', 'batch_size'):
-            if not isinstance(bc[key], int) or bc[key] <= 0:
-                raise ValueError(f'behavior_cloning.{key} must be a positive integer')
-        if not math.isfinite(bc['learning_rate']) or bc['learning_rate'] <= 0:
-            raise ValueError('behavior_cloning.learning_rate must be positive and finite')
+        if not isinstance(bc.get('enabled', True), bool):
+            raise ValueError('behavior_cloning.enabled must be true or false')
+        if bc.get('enabled', True):
+            for key in ('epochs', 'num_samples', 'batch_size'):
+                if not isinstance(bc[key], int) or bc[key] <= 0:
+                    raise ValueError(f'behavior_cloning.{key} must be a positive integer')
+            if not math.isfinite(bc['learning_rate']) or bc['learning_rate'] <= 0:
+                raise ValueError('behavior_cloning.learning_rate must be positive and finite')
         if config['env']['device'] != 'cpu':
             raise ValueError('ZO evaluation supports CPU only')
         torch.set_num_threads(1)
@@ -305,8 +308,13 @@ class ZerothOrderTrainer:
 
     def pretrain(self):
         """vanilla_bc: uniform integer queues 0..100, softmax teacher, MSE/Adam."""
-        log_progress('Behavioral cloning started')
         bc = self.config['behavior_cloning']
+        if not bc.get('enabled', True):
+            self.policy.eval()
+            torch.save(self.policy.state_dict(), self.output_dir / 'initial_policy.pt')
+            log_progress(f'Behavioral cloning disabled; initial policy saved to {self.output_dir / "initial_policy.pt"}')
+            return
+        log_progress('Behavioral cloning started')
         optimizer = torch.optim.Adam(self.policy.parameters(), lr=bc['learning_rate'])
         self.policy.train()
         for _ in range(bc['epochs']):
