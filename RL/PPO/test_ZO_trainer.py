@@ -188,6 +188,41 @@ class ZOTests(unittest.TestCase):
         self.assertTrue(torch.isinf(state.arrival_times[0, 1]))
         self.assertEqual(score, 0.0)
 
+    def test_nearly_simultaneous_arrivals_do_not_make_negative_clock(self):
+        env = make_environment(self.env, self.config, 42)
+        env.reset(init_queues=torch.zeros(1, 2))
+        install_streams(env, 42)
+        # Both round UP to the same float32 value, beyond the second arrival.
+        clocks = torch.tensor([[1.00000007, 1.00000008]], dtype=torch.float64)
+        env.env_state = env.env_state._replace(arrival_times=clocks)
+        action = torch.tensor([[[1., 0.]]])
+        first = paired_step(env, action)[-1]['event_time']
+        self.assertEqual(float(first), float(clocks[0, 0]))
+        self.assertEqual(env.st_argmin.index, 0)
+        self.assertTrue((env.env_state.arrival_times >= 0).all())
+        second = paired_step(env, action)[-1]['event_time']
+        self.assertEqual(env.st_argmin.index, 1)
+        self.assertEqual(float(second), float(clocks[0, 1] - clocks[0, 0]))
+        self.assertGreaterEqual(float(second), 0)
+
+    def test_service_work_update_keeps_double_precision(self):
+        self.env['mu'] = [[1.3, 1.3]]
+        env = make_environment(self.env, self.config, 42)
+        env.reset(init_queues=torch.tensor([[1., 0.]]))
+        install_streams(env, 42)
+        work = torch.tensor([[1.30000006, 2.]], dtype=torch.float64)
+        env.env_state = env.env_state._replace(
+            service_times=[[work.clone()], []],
+            arrival_times=torch.tensor([[10., 1.00000007]], dtype=torch.float64))
+        action = torch.tensor([[[1., 0.]]])
+        dt = paired_step(env, action)[-1]['event_time']
+        self.assertEqual(env.st_argmin.index, 1)
+        residual = env.env_state.service_times[0][0][0, 0]
+        expected = work[0, 0] - dt * env.mu[0, 0, 0]
+        self.assertGreater(float(residual), 0)
+        self.assertEqual(float(residual), float(expected))
+        self.assertGreater(float(paired_step(env, action)[-1]['event_time']), 0)
+
     def test_pretrain_saves_reusable_initial_policy(self):
         with tempfile.TemporaryDirectory() as temp:
             trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')

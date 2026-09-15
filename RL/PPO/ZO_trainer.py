@@ -93,7 +93,9 @@ def make_environment(env_config, config, seed):
     # PPO expands the actor's server rows; expand simulator rows consistently.
     pool = env_config['num_pool']
     env.network = env.network.repeat_interleave(pool, dim=1)
-    env.mu = env.mu.repeat_interleave(pool, dim=1)
+    # A float64 scalar times a float32 rate vector still produces float32 in
+    # Torch. Keep rates double too, so consumed service work is not rounded up.
+    env.mu = env.mu.repeat_interleave(pool, dim=1).double()
     env.s = env.network.shape[1]
     return env
 
@@ -188,6 +190,7 @@ def evaluate_trajectory(job, *, return_state=True):
     torch.set_num_threads(1)
     env = make_environment(env_config, config, seed)
     env.env_state = copy.deepcopy(initial_state)
+    env.env_state = env.env_state._replace(time=env.env_state.time.double())
     env.obs = Obs(env.env_state.queues, env.env_state.time)
     install_streams(env, seed)
     integral = elapsed = 0.0

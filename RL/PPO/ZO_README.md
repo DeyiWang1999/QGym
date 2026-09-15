@@ -58,7 +58,8 @@ has the same distribution as PPO, not identical RNG consumption from its critic.
 - Arrival/service streams are separated by source event and queue. A local
   evaluation adapter prevents internal routing from resetting external arrival
   clocks (the base simulator does this). This is necessary for paired external
-  arrival histories. ZO selects event times in float64 to avoid rounding past
+  arrival histories. ZO uses float64 service rates, evaluation time, and event
+  times so consumed service work also stays in float64, and to avoid rounding past
   nearly simultaneous events and creating negative residual clocks; the shared
   simulator keeps its existing float32 default for other callers. Time-dependent
   rate functions still follow the existing loader's sampling convention.
