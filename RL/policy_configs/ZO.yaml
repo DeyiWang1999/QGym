@@ -13,7 +13,7 @@ behavior_cloning:
   num_samples: 100000
   batch_size: 100
   epochs: 1
-  learning_rate: 0.0003
+  learning_rate: 0
 training:
   mode: split_layer # vanilla, partitioned, split_layer
   total_iterations: 100
