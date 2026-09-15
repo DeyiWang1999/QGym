@@ -3,8 +3,8 @@ env:
   device: cpu
   env_temp: 1.0
   model_seed: 100
-  train_seed: 3003
-  test_seed: 3003
+  train_seed: 42
+  test_seed: 42
   randomize: false # Evaluation always uses deterministic argmax, regardless of this flag.
 model:
   policy_name: WC
