@@ -1,5 +1,6 @@
 """Evaluate saved ZO actors using PPO's simulator, rollout, and metrics."""
 import argparse
+import gc
 import json
 from pathlib import Path
 import sys
@@ -57,6 +58,17 @@ def evaluation_schedule(env_config, ranking_check):
     return (base * 5 if ranking_check else base), milestones
 
 
+def load_selected_checkpoint(path):
+    if path.name == 'final_policy.pt':
+        checkpoint = load_checkpoint(path.parent / 'original_000000.pt')
+        checkpoint['policy_state_dict'] = torch.load(path, map_location='cpu', weights_only=True)
+    else:
+        checkpoint = load_checkpoint(path)
+    # Training continuation states can be large and are not used for reset evaluation.
+    checkpoint.pop('initial_states', None)
+    return checkpoint
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('checkpoint_dir', type=Path, nargs='?', default=Path(__file__).parent / 'reentrant_9')
@@ -80,20 +92,18 @@ def main():
                      '. A 100-iteration run ends at original_000099.pt; use --indices 0 10 20 30 40 50 60 70 80 90 --include-final for the final updated actor.')
     jobs = []
     for path in paths:
-        if path.name == 'final_policy.pt':
-            checkpoint = load_checkpoint(args.checkpoint_dir / 'original_000000.pt')
-            checkpoint['policy_state_dict'] = torch.load(path, map_location='cpu', weights_only=True)
-        else:
-            checkpoint = load_checkpoint(path)
+        checkpoint = load_selected_checkpoint(path)
         used = validate_seeds(checkpoint, seeds)
         env_config = checkpoint['env_config']
         evaluation_schedule(env_config, args.ranking_check)
         if env_config['num_pool'] != 1:
             raise ValueError(f'{path}: PPO-compatible evaluation currently requires num_pool=1')
-        jobs.append((path, checkpoint, used))
+        jobs.append(path)
         eval_t, milestones = evaluation_schedule(env_config, args.ranking_check)
         print(f'{path.name}: {env_config["name"]}; base test_T={env_config["test_T"]}; '
               f'{eval_t} events; milestones={milestones}', flush=True)
+        del checkpoint, env_config
+        gc.collect()
     print(f'Validated {len(jobs)} policies; 100 environments; seeds {seeds[0]}–{seeds[-1]}', flush=True)
     if args.check_only:
         return
@@ -101,7 +111,9 @@ def main():
     output = args.output or args.checkpoint_dir / (
         'ppo_ranking_evaluation.json' if args.ranking_check else 'ppo_evaluation.json')
     records = []
-    for path, checkpoint, used in jobs:
+    for path in jobs:
+        checkpoint = load_selected_checkpoint(path)
+        used = validate_seeds(checkpoint, seeds)
         config, env_config = checkpoint['config'], checkpoint['env_config']
         eval_t, milestones = evaluation_schedule(env_config, args.ranking_check)
         state = checkpoint['policy_state_dict']
@@ -137,6 +149,11 @@ def main():
                                          environment_seeds=seeds, action_seeds=seeds,
                                          results=records), indent=2) + '\n')
         print(f'Saved {output}', flush=True)
+        # eval() has already joined its worker pool. Release this policy's parent
+        # environments (including simulator reference cycles) before creating more.
+        del evaluator, envs, policy, state, checkpoint, config, env_config
+        gc.collect()
+        print(f'Finished {path.name}; environments released before next policy', flush=True)
 
 
 if __name__ == '__main__':

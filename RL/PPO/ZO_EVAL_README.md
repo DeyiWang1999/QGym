@@ -9,6 +9,9 @@ python RL/PPO/ZO_eval.py RL/PPO/reentrant_9
 This requests `original_000000.pt`, `original_000010.pt`, ..., `original_000100.pt`.
 All requested files and their saved seed metadata are checked before any rollout.
 Add `--check-only` to perform only these checks.
+Policies are evaluated strictly one at a time. Validation retains only file paths,
+not all checkpoint tensors or saved training states. Each policy's worker pool
+finishes and its environments are released before the next policy is loaded.
 
 A run with `total_iterations: 100` saves originals numbered 0–99. For that run:
 
