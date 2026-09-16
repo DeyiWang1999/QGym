@@ -50,14 +50,18 @@ def _init_eval_worker(policy_bytes):
     _eval_policy.set_training_mode(False)
 
 
-def _eval_trajectory(env_bytes, eval_t):
+def _eval_trajectory(env_bytes, eval_t, action_seed=None, milestones=None):
     # Cloudpickle supports the local arrival/service functions stored in each env.
     dq = cloudpickle.loads(env_bytes)
+    if action_seed is not None:
+        torch.manual_seed(action_seed)
     obs, state = dq.reset(seed=dq.seed)
     total_cost = torch.tensor([[0.]])
     time_weight_queue_len = torch.tensor([[0.]])
+    snapshots = {}
+    milestone_set = set(milestones or ())
     with torch.no_grad():
-        for _ in range(eval_t):
+        for step in range(1, eval_t + 1):
             # reset() returns a queue array; step() returns Obs(queues, time).
             # Select queues before conversion so the Obs tuple is never cast.
             batch_queue = torch.as_tensor(obs[0]).reshape(dq.batch, -1)
@@ -69,6 +73,11 @@ def _eval_trajectory(env_bytes, eval_t):
             time_weight_queue_len = (
                 time_weight_queue_len + info['queues'] * info['event_time']
             )
+            if step in milestone_set:
+                snapshots[step] = (total_cost.numpy().copy(),
+                                   time_weight_queue_len.numpy().copy(), state.time.numpy().copy())
+    if milestones is not None:
+        return snapshots
     # Return compact NumPy results rather than sharing worker-owned tensor storage.
     return (total_cost.numpy(), time_weight_queue_len.numpy(), state.time.numpy())
 
@@ -102,7 +111,7 @@ class BCD(Dataset):
 
 class parallel_eval(BaseCallback):
     def __init__(self, model, eval_env, eval_freq, eval_t, test_policy, test_seed, init_test_queues, test_batch, device, num_pool, time_f, policy_name, per_iter_normal_obs, env_config_name, bc, randomize = True, 
-                 verbose=1):
+                 verbose=1, seed_actions=False, milestones=None):
         super(parallel_eval, self).__init__(verbose)
         self.model = model
         self.eval_env = eval_env
@@ -123,6 +132,14 @@ class parallel_eval(BaseCallback):
         self.per_iter_normal_obs = per_iter_normal_obs
         self.env_config_name = env_config_name
         self.bc = bc
+        self.seed_actions = seed_actions
+        self.milestones = None if milestones is None else list(milestones)
+        if self.milestones is not None and (
+                not self.milestones or self.milestones != sorted(set(self.milestones))
+                or any(not isinstance(step, int) or step <= 0 for step in self.milestones)
+                or self.milestones[-1] != eval_t):
+            raise ValueError('Milestones must be increasing positive integers ending at eval_t')
+        self.milestone_metrics = []
         print(f'eval env config name: {self.env_config_name}')
         self.iter = 0
 
@@ -219,6 +236,8 @@ class parallel_eval(BaseCallback):
         if not self.eval_env:
             raise ValueError('Evaluation requires at least one environment')
         worker_count = min(48, os.cpu_count() or 1, len(self.eval_env))
+        print(f'Evaluating {len(self.eval_env)} environments across {worker_count} CPU workers '
+              '(maximum 48; one Torch thread per worker)', flush=True)
         policy_bytes = cloudpickle.dumps(_cpu_copy(self.model.policy))
 
         def serialize_env(dq):
@@ -233,9 +252,24 @@ class parallel_eval(BaseCallback):
             initializer=_init_eval_worker,
             initargs=(policy_bytes,),
         ) as executor:
-            futures = [executor.submit(_eval_trajectory, serialize_env(dq), self.eval_t)
+            futures = [executor.submit(_eval_trajectory, serialize_env(dq), self.eval_t,
+                                       dq.seed if self.seed_actions else None, self.milestones)
                        for dq in self.eval_env]
             results = [future.result() for future in futures]
+
+        self.milestone_metrics = []
+        if self.milestones is not None:
+            for step in self.milestones:
+                totals = torch.cat([
+                    torch.as_tensor(result[step][1]) / torch.as_tensor(result[step][2])
+                    for result in results
+                ]).sum(dim=-1)
+                if not torch.isfinite(totals).all():
+                    raise RuntimeError(f'Nonfinite queue metrics at event {step}')
+                self.milestone_metrics.append(dict(
+                    events=step, total_queue_mean=float(totals.mean()),
+                    total_queue_std=float(totals.std()) if totals.numel() > 1 else 0.))
+            results = [result[self.eval_t] for result in results]
 
         # Keep input order and the original metric definitions.
         total_cost_batch = [torch.as_tensor(result[0]) for result in results]
