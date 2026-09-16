@@ -162,12 +162,13 @@ class ZOTests(unittest.TestCase):
             before = parameters_to_vector(trainer.policy.parameters()).detach().clone()
             initial_time = trainer.states[0].time.clone()
             n = len(trainer.seeds)
+            active_count = sum(bool(before[part].abs().max()) for part in trainer.partitions)
             calls = []
 
             def fake(job, *, return_state=True):
                 index = len(calls)
                 calls.append(copy.deepcopy(job[3]))
-                candidate = (index // n) % (len(trainer.partitions)+1)
+                candidate = (index // n) % (active_count+1)
                 state = copy.deepcopy(job[3])
                 return (10. if candidate == 0 else (9. if candidate == 1 else 11.),
                         state._replace(time=state.time + (1 if candidate == 0 else 100))
@@ -197,6 +198,49 @@ class ZOTests(unittest.TestCase):
             self.assertNotEqual(float(last_base[first].abs().max()), history[1]['para_maxima'][0])
             torch.testing.assert_close((after[first] - last_base[first]).abs(),
                                        torch.full_like(after[first], history[-1]['perturbation_distances'][0] * 0.5))
+
+    def test_initially_zero_partitions_skip_perturbation_and_evaluation(self):
+        for mode in ('vanilla', 'partitioned', 'split_layer'):
+            for all_zero in (False, True):
+                with self.subTest(mode=mode, all_zero=all_zero), tempfile.TemporaryDirectory() as temp:
+                    self.config['training'].update(mode=mode, partition_count=3)
+                    trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+                    with torch.no_grad():
+                        for parameter in trainer.policy.parameters():
+                            parameter.fill_(0. if all_zero else 1.)
+                        vector = parameters_to_vector(trainer.policy.parameters()).detach().clone()
+                        vector[trainer.partitions[0]] = 0
+                        torch.nn.utils.vector_to_parameters(vector, trainer.policy.parameters())
+                    active = [i for i, part in enumerate(trainer.partitions)
+                              if bool(vector[part].abs().max())]
+                    calls = []
+
+                    def evaluate(job):
+                        candidate = parameters_to_vector(job[2].parameters()).detach()
+                        for i, part in enumerate(trainer.partitions):
+                            if i not in active:
+                                torch.testing.assert_close(candidate[part], vector[part], rtol=0, atol=0)
+                        calls.append(job)
+                        return (10. if job[-1] else 9., job[3] if job[-1] else None)
+
+                    with patch.object(trainer, 'pretrain'), patch.object(trainer, 'pre_train_eval'), \
+                            patch('RL.PPO.ZO_trainer.evaluate_packed_trajectory', side_effect=evaluate), \
+                            patch('torch.randint', wraps=torch.randint) as perturb:
+                        trainer.train()
+                    iterations = self.config['training']['total_iterations']
+                    self.assertEqual(perturb.call_count, iterations * len(active))
+                    self.assertEqual(len(calls), iterations * len(trainer.seeds) * (len(active) + 1))
+                    final = parameters_to_vector(trainer.policy.parameters()).detach()
+                    for i, part in enumerate(trainer.partitions):
+                        if i not in active:
+                            torch.testing.assert_close(final[part], vector[part], rtol=0, atol=0)
+                        else:
+                            self.assertFalse(torch.equal(final[part], vector[part]))
+                    history = [json.loads(line) for line in (Path(temp)/'run/history.jsonl').read_text().splitlines()]
+                    for record in history:
+                        self.assertEqual(record['active_partitions'], active)
+                        self.assertEqual(len(record['scores']), len(active) + 1)
+                        self.assertEqual(record['accepted'], [True] * len(active))
 
     def test_all_modes_and_spawn(self):
         for mode in ('vanilla', 'partitioned', 'split_layer'):

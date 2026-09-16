@@ -372,7 +372,10 @@ class ZerothOrderTrainer:
         self.pre_train_eval()
         initial_parameters = parameters_to_vector(self.policy.parameters()).detach()
         para_maxima = [float(initial_parameters[part].abs().max()) for part in self.partitions]
-        pool = ProcessPoolExecutor(self.workers, mp_context=mp.get_context('spawn')) if self.workers > 1 else None
+        # Fix eligibility at the start of ZO training, after behavioral cloning.
+        active_partitions = [i for i, maximum in enumerate(para_maxima) if maximum != 0]
+        workers = min(self.workers, len(self.seeds) * (len(active_partitions) + 1))
+        pool = ProcessPoolExecutor(workers, mp_context=mp.get_context('spawn')) if workers > 1 else None
         try:
             for iteration in range(self.training['total_iterations']):
                 label = f"Training iteration {iteration + 1}/{self.training['total_iterations']}"
@@ -384,10 +387,10 @@ class ZerothOrderTrainer:
                             'initial_states': self.states, 'evaluation_seeds': self.seeds},
                            self.output_dir / f'original_{iteration:06d}.pt')
                 policies, directions = [copy.deepcopy(self.policy)], []
-                distances = []
-                for part, para_max in zip(self.partitions, para_maxima):
-                    distance = ratio * para_max
-                    distances.append(distance)
+                distances = [ratio * maximum for maximum in para_maxima]
+                for index in active_partitions:
+                    part = self.partitions[index]
+                    distance = distances[index]
                     direction = torch.randint(0, 2, (part.stop - part.start,), generator=self.generator).float() * 2 - 1
                     candidate = base.clone()
                     candidate[part] += distance * direction
@@ -408,13 +411,13 @@ class ZerothOrderTrainer:
                 self.states = [unpack_state(result[1]) for result in results[:n]]
                 accepted = [score < scores[0] for score in scores[1:]]
                 updated = base.clone()
-                for part, direction, accept, distance in zip(self.partitions, directions, accepted, distances):
+                for index, direction, accept in zip(active_partitions, directions, accepted):
                     if accept:
-                        updated[part] += self.training['update_ratio'] * distance * direction
+                        updated[self.partitions[index]] += self.training['update_ratio'] * distances[index] * direction
                 vector_to_parameters(updated, self.policy.parameters())
                 record = dict(iteration=iteration, perturbation_ratio=ratio,
                               para_maxima=para_maxima, perturbation_distances=distances,
-                              scores=scores, accepted=accepted)
+                              active_partitions=active_partitions, scores=scores, accepted=accepted)
                 with (self.output_dir / 'history.jsonl').open('a') as stream:
                     stream.write(json.dumps(record) + '\n')
                 log_progress(f'{label} finished: {record}')
