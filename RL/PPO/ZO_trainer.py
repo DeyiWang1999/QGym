@@ -372,8 +372,15 @@ class ZerothOrderTrainer:
         self.pre_train_eval()
         initial_parameters = parameters_to_vector(self.policy.parameters()).detach()
         para_maxima = [float(initial_parameters[part].abs().max()) for part in self.partitions]
-        # Fix eligibility at the start of ZO training, after behavioral cloning.
-        active_partitions = [i for i, maximum in enumerate(para_maxima) if maximum != 0]
+        # Fix scales after behavioral cloning. Zero parts inherit the preceding
+        # part's initial scale, including through consecutive zero parts.
+        # Leading zero parts have no preceding scale and remain unchanged.
+        perturbation_scales = []
+        previous_scale = 0.0
+        for maximum in para_maxima:
+            previous_scale = maximum if maximum != 0 else previous_scale
+            perturbation_scales.append(previous_scale)
+        active_partitions = [i for i, scale in enumerate(perturbation_scales) if scale != 0]
         workers = min(self.workers, len(self.seeds) * (len(active_partitions) + 1))
         pool = ProcessPoolExecutor(workers, mp_context=mp.get_context('spawn')) if workers > 1 else None
         try:
@@ -387,7 +394,7 @@ class ZerothOrderTrainer:
                             'initial_states': self.states, 'evaluation_seeds': self.seeds},
                            self.output_dir / f'original_{iteration:06d}.pt')
                 policies, directions = [copy.deepcopy(self.policy)], []
-                distances = [ratio * maximum for maximum in para_maxima]
+                distances = [ratio * scale for scale in perturbation_scales]
                 for index in active_partitions:
                     part = self.partitions[index]
                     distance = distances[index]
