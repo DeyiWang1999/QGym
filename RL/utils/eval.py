@@ -83,9 +83,10 @@ def _eval_trajectory(env_bytes, eval_t, action_seed=None, milestones=None):
 
 
 class BCD(Dataset):
-    def __init__(self, num_samples, network):
+    def __init__(self, num_samples, network, mu):
         self.num_samples = num_samples
         self.network = network
+        self.mu = mu
         self.s = self.network.shape[0]
         self.q = self.network.shape[1]
 
@@ -96,9 +97,8 @@ class BCD(Dataset):
         # Generate random input data
         input_data = np.random.randint(0, 101, self.q)
         obs = torch.tensor(input_data)
-        action_probs = F.softmax(torch.tensor(input_data).float(), dim=-1)
-        action_probs = action_probs * self.network
-        action_probs = torch.minimum(action_probs, obs.unsqueeze(0).repeat(1, self.s, 1))
+        # Weight each eligible queue by its service rate times queue length.
+        action_probs = (self.mu * obs.float() * self.network).unsqueeze(0)
         zero_mask = torch.all(action_probs == 0, dim=2).reshape(-1, self.s, 1).repeat(1, 1, self.q)
         action_probs = action_probs + zero_mask * self.network
         action_probs = action_probs / torch.sum(action_probs, dim=-1).reshape(-1, self.s, 1)
@@ -174,7 +174,8 @@ class parallel_eval(BaseCallback):
             ], lr=3e-4)
 
         # print(f'network: {self.eval_env[0].network}, shape: {self.eval_env[0].network[0].shape}')
-        BCD_dataset = BCD(num_samples = 100000, network = self.eval_env[0].network[0])
+        BCD_dataset = BCD(num_samples = 1000000, network = self.eval_env[0].network[0],
+                          mu = self.eval_env[0].mu[0])
         BCD_loader = DataLoader(BCD_dataset, batch_size = self.test_batch, shuffle = True)
 
         for i, (obs, target) in enumerate(BCD_loader):
@@ -185,15 +186,16 @@ class parallel_eval(BaseCallback):
             self.optimizer_policy.step()
 
     def pre_train_eval(self):
-        print('pre_train_eval')
         if self.bc:
+            print('behavioral cloning')
             self.behavior_cloning()
         # self.behavior_cloning()
-        q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std = self.eval()
+        print('pre_train_eval')
+        # q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std = self.eval()
 
-        self.model.policy.update_mean_std(mean_queue_length = q_mean, std_queue_length = q_std)
-        print(f"mean_queue_length: {self.model.policy.mean_queue_length}")
-        print(f"std_queue_length: {self.model.policy.std_queue_length}")
+        # self.model.policy.update_mean_std(mean_queue_length = q_mean, std_queue_length = q_std)
+        # print(f"mean_queue_length: {self.model.policy.mean_queue_length}")
+        # print(f"std_queue_length: {self.model.policy.std_queue_length}")
 
         return True
 
