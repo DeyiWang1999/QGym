@@ -19,6 +19,9 @@ from RL.utils.rl_env import load_rl_p_env
 from main.env import EnvState, Obs
 
 
+PRETRAIN_EVALUATION_PATH = Path(__file__).resolve().parent / 'pretrain_evaluation.json'
+
+
 def log_progress(message):
     """Print local wall-clock time, including UTC offset, without buffering."""
     timestamp = datetime.now().astimezone().isoformat(sep=' ', timespec='seconds')
@@ -187,14 +190,19 @@ def unpack_state(packed):
 
 def evaluate_packed_trajectory(job):
     """Only baseline evaluations return state across the process boundary."""
-    env_config, config, policy, packed, seed, keep_state = job
+    env_config, config, policy, packed, seed, keep_state = job[:6]
+    if len(job) > 6:
+        score, state, samples = evaluate_trajectory(
+            (env_config, config, policy, unpack_state(packed), seed),
+            return_state=keep_state, sample_count=job[6], sample_seed=job[7])
+        return score, pack_state(state) if keep_state else None, samples
     score, state = evaluate_trajectory(
         (env_config, config, policy, unpack_state(packed), seed),
         return_state=keep_state)
     return score, pack_state(state) if keep_state else None
 
 
-def evaluate_trajectory(job, *, return_state=True):
+def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_seed=0):
     env_config, config, policy, initial_state, seed = job
     torch.set_num_threads(1)
     env = make_environment(env_config, config, seed)
@@ -206,9 +214,18 @@ def evaluate_trajectory(job, *, return_state=True):
     arrivals = 0
     policy.eval()
     action_generator = torch.Generator().manual_seed(seed)
+    # Independent reservoir slots give uniform event-state draws WITH replacement,
+    # without retaining the trajectory or consuming any training/action RNG draws.
+    sample_rng = np.random.default_rng(sample_seed)
+    samples = np.empty((sample_count or 0, policy.q), dtype=np.float32)
+    seen = 0
     with torch.no_grad():
         while arrivals < config['training']['evaluation_length']:
             queues = env.env_state.queues.clone()
+            if sample_count:
+                seen += 1
+                replace = sample_rng.integers(seen, size=sample_count) == 0
+                samples[replace] = queues.numpy().reshape(-1)
             _, _, _, _, info = paired_step(
                 env, policy.act(queues, generator=action_generator, deterministic=False))
             dt = float(info['event_time'])
@@ -224,7 +241,37 @@ def evaluate_trajectory(job, *, return_state=True):
                             bool((env.queue_event_options[event] > 0).any()))
     if elapsed <= 0:
         raise RuntimeError('Evaluation must have positive elapsed time')
-    return integral / elapsed, copy.deepcopy(env.env_state) if return_state else None
+    result = integral / elapsed, copy.deepcopy(env.env_state) if return_state else None
+    return (*result, samples) if sample_count is not None else result
+
+
+def policy_diagnostics(policies, queues, partitions):
+    """Compare masked distributions using full queue vectors as actor inputs."""
+    original = policies[0]
+    available = ((queues > 0).unsqueeze(1) & (original.network > 0).unsqueeze(0)).sum(-1)
+    choice = available > 1
+    total = available.numel()
+    with torch.no_grad():
+        baseline = original.probabilities(queues)
+        comparisons = []
+        for partition, policy in zip(partitions, policies[1:]):
+            tv = (policy.probabilities(queues) - baseline).abs().sum(-1) / 2
+            eligible = tv[choice]
+            mean = float(eligible.mean()) if eligible.numel() else None
+            comparisons.append(dict(
+                partition=partition, mean_total_variation=mean,
+                max_total_variation=float(eligible.max()) if eligible.numel() else None,
+                similarity=1 - mean if mean is not None else None,
+                mean_total_variation_with_choice=mean,
+                per_server_mean_total_variation=[
+                    float(tv[:, s][choice[:, s]].mean()) if choice[:, s].any() else None
+                    for s in range(original.s)]))
+    return dict(sampled_states=len(queues), servers=original.s,
+                similarity_per_server_states=int(choice.sum()),
+                per_server_states=total, at_most_one_nonempty=int((available <= 1).sum()),
+                at_most_one_nonempty_fraction=float((available <= 1).float().mean()),
+                zero_nonempty=int((available == 0).sum()),
+                one_nonempty=int((available == 1).sum()), comparisons=comparisons)
 
 
 def evaluate_pretrain_trajectory(job):
@@ -287,7 +334,17 @@ class ZerothOrderTrainer:
     def __init__(self, env_config, config, output_dir):
         self.env_config, self.config = copy.deepcopy(env_config), copy.deepcopy(config)
         self.training = config['training']
+        self.pretrain_evaluation_enabled = config.get('pretrain_evaluation', {}).get('enabled', True)
+        if not isinstance(self.pretrain_evaluation_enabled, bool):
+            raise ValueError('pretrain_evaluation.enabled must be true or false')
         t = self.training
+        diagnostics = t.get('policy_diagnostics', {})
+        if not isinstance(diagnostics.get('enabled', False), bool):
+            raise ValueError('policy_diagnostics.enabled must be true or false')
+        self.diagnostics_enabled = diagnostics.get('enabled', False)
+        self.diagnostic_samples = diagnostics.get('num_samples', 1000)
+        if self.diagnostics_enabled and (type(self.diagnostic_samples) is not int or self.diagnostic_samples <= 0):
+            raise ValueError('policy_diagnostics.num_samples must be a positive integer')
         for key in ('total_iterations', 'evaluation_trajectories', 'evaluation_length', 'max_cpus'):
             if not isinstance(t[key], int) or t[key] <= 0:
                 raise ValueError(f'{key} must be a positive integer')
@@ -314,12 +371,13 @@ class ZerothOrderTrainer:
         env = make_environment(env_config, config, config['env']['train_seed'])
         self.policy = ZOPolicy(env.network[0], config['model']['scale'], config['env']['randomize'],
                                env.s // env_config['num_pool'])
+        self.service_rates = env.mu[0].float().clone()
         self.partitions = parameter_partitions(self.policy, t['mode'], t['partition_count'])
         self.generator = torch.Generator().manual_seed(t['perturbation_seed'])
         self.seeds = t['evaluation_seeds']
         if self.seeds is None:
-            self.seeds = list(range(config['env']['test_seed'],
-                                    config['env']['test_seed'] + t['evaluation_trajectories']))
+            self.seeds = list(range(config['env']['train_seed'],
+                                    config['env']['train_seed'] + t['evaluation_trajectories']))
         if (len(self.seeds) != t['evaluation_trajectories'] or
                 len(set(self.seeds)) != len(self.seeds) or
                 any(not isinstance(s, int) or not 0 <= s < 2**32 for s in self.seeds)):
@@ -341,7 +399,7 @@ class ZerothOrderTrainer:
         self.output_dir.mkdir(parents=True, exist_ok=False)
 
     def pretrain(self):
-        """vanilla_bc: uniform integer queues 0..100, softmax teacher, MSE/Adam."""
+        """Uniform integer queues 0..100, queue-length x service-rate teacher, MSE/Adam."""
         bc = self.config['behavior_cloning']
         if not bc.get('enabled', True):
             self.policy.eval()
@@ -355,9 +413,13 @@ class ZerothOrderTrainer:
             for offset in range(0, bc['num_samples'], bc['batch_size']):
                 size = min(bc['batch_size'], bc['num_samples'] - offset)
                 queues = torch.tensor(np.random.randint(0, 101, (size, self.policy.q))).float()
-                target = queues.softmax(-1).unsqueeze(1) * self.policy.network
-                target = torch.minimum(target, queues.unsqueeze(1))
-                target = target + (target == 0).all(-1, keepdim=True) * self.policy.network
+                compatible = (self.policy.network > 0).unsqueeze(0)
+                target = queues.unsqueeze(1) * self.service_rates.unsqueeze(0) * compatible
+                # Zero-score rows fall back to nonempty compatible queues, or
+                # all compatible queues when idle, matching the actor's mask.
+                fallback = compatible & (queues > 0).unsqueeze(1)
+                fallback = torch.where(fallback.any(-1, keepdim=True), fallback, compatible)
+                target = torch.where(target.sum(-1, keepdim=True) > 0, target, fallback.float())
                 target = target / target.sum(-1, keepdim=True)
                 optimizer.zero_grad()
                 loss = F.mse_loss(self.policy.probabilities(queues), target)
@@ -409,6 +471,14 @@ class ZerothOrderTrainer:
                 jobs = [(self.env_config, self.config, policy, state, seed, index == 0)
                         for index, policy in enumerate(policies)
                         for state, seed in zip(packed_states, self.seeds)]
+                if self.diagnostics_enabled:
+                    rng = np.random.default_rng(np.random.SeedSequence(
+                        [self.training['perturbation_seed'], iteration, 917]))
+                    # Equal trajectory weighting, matching the evaluation objective.
+                    counts = rng.multinomial(self.diagnostic_samples,
+                                             np.full(len(self.seeds), 1 / len(self.seeds)))
+                    for i, count in enumerate(counts):
+                        jobs[i] = (*jobs[i], int(count), int(rng.integers(2**32)))
                 results = list(pool.map(evaluate_packed_trajectory, jobs)) if pool else list(map(evaluate_packed_trajectory, jobs))
                 n = len(self.seeds)
                 scores = [float(np.mean([r[0] for r in results[i:i+n]]))
@@ -425,6 +495,9 @@ class ZerothOrderTrainer:
                 record = dict(iteration=iteration, perturbation_ratio=ratio,
                               para_maxima=para_maxima, perturbation_distances=distances,
                               active_partitions=active_partitions, scores=scores, accepted=accepted)
+                if self.diagnostics_enabled:
+                    queues = torch.from_numpy(np.concatenate([r[2] for r in results[:n]]))
+                    record['policy_diagnostics'] = policy_diagnostics(policies, queues, active_partitions)
                 with (self.output_dir / 'history.jsonl').open('a') as stream:
                     stream.write(json.dumps(record) + '\n')
                 log_progress(f'{label} finished: {record}')
@@ -437,6 +510,24 @@ class ZerothOrderTrainer:
 
     def pre_train_eval(self):
         """Match parallel_eval.pre_train_eval's scalar queue statistics once."""
+        if not self.pretrain_evaluation_enabled:
+            # Identity normalization persists in existing checkpoint buffers,
+            # so evaluation and restored policies also receive raw queue values.
+            self.policy.update_mean_std(0., 1.)
+            torch.save(self.policy.state_dict(), self.output_dir / 'initial_policy.pt')
+            log_progress('Pre-training evaluation disabled; using raw queue inputs (mean=0, std=1)')
+            return
+        if PRETRAIN_EVALUATION_PATH.is_file():
+            record = json.loads(PRETRAIN_EVALUATION_PATH.read_text())
+            mean = float(record['mean_queue_length'])
+            std = float(record['std_queue_length'])
+            if not math.isfinite(mean) or not math.isfinite(std) or std < 0:
+                raise ValueError('Cached pretraining mean/std must be finite with std >= 0')
+            self.policy.update_mean_std(mean, std)
+            (self.output_dir / 'pretrain_evaluation.json').write_text(json.dumps(record) + '\n')
+            torch.save(self.policy.state_dict(), self.output_dir / 'initial_policy.pt')
+            log_progress(f'Loaded normalization from {PRETRAIN_EVALUATION_PATH}; skipping pre-training evaluation')
+            return
         length = self.env_config['test_T']
         if not isinstance(length, int) or length <= 0:
             raise ValueError('env.test_T must be a positive integer')

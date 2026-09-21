@@ -232,7 +232,7 @@ class Trainer:
 
             lex = torch.zeros(dq.batch, dq.s, dq.q).to(self.model_config['env']['device'])
         
-            obs, state = dq.reset(seed = seed)
+            obs, state = dq.reset(seed = seed + dq_idx)
             
             total_cost = torch.tensor([[0.]]).to(self.model_config['env']['device'])
             time_weight_queue_len = torch.tensor([[0.]]).to(self.model_config['env']['device'])

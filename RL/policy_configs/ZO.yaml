@@ -3,18 +3,20 @@ env:
   device: cpu
   env_temp: 1.0
   model_seed: 100
-  train_seed: 42
+  train_seed: 3003
   test_seed: 42
   randomize: true # Evaluations always sample actions, regardless of this flag.
 model:
   policy_name: WC
   scale: 10
 behavior_cloning:
-  enabled: false # Set false to start ZO directly from the initialized actor.
-  num_samples: 100000
+  enabled: true # Set false to start ZO directly from the initialized actor.
+  num_samples: 1000000
   batch_size: 100
   epochs: 1
   learning_rate: 0.0003
+pretrain_evaluation:
+  enabled: false # Set false to skip evaluation/cache loading and use raw queue inputs.
 training:
   mode: split_layer # vanilla, partitioned, split_layer
   total_iterations: 100
@@ -29,3 +31,6 @@ training:
   initial_queues: null # Optional list of queue vectors, one per trajectory.
   update_ratio: 0.2
   max_cpus: 48
+  policy_diagnostics:
+    enabled: false
+    num_samples: 1000 # Q total queue states per iteration, sampled with replacement.

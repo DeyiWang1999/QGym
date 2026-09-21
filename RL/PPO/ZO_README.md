@@ -12,6 +12,41 @@ accept config names or absolute YAML paths. `--output-dir` selects a new output
 directory; otherwise the directory is `RL/PPO/<network_name>`, for example
 `RL/PPO/reentrant_2`.
 
+Set `pretrain_evaluation.enabled: false` to skip normalization fitting and cached
+statistics entirely. Queue inputs remain raw, with identity statistics (mean 0,
+std 1) saved in checkpoints, including `initial_policy.pt`. Behavioral cloning
+still follows its own switch. The evaluation switch defaults to true if omitted.
+
+When enabled, if `RL/PPO/pretrain_evaluation.json` exists, its `mean_queue_length` and
+`std_queue_length` are loaded instead of running the 100-environment pretraining
+evaluation. The lookup is independent of the working directory. Statistics are
+copied into the run directory and saved in the initial policy checkpoint.
+Behavioral cloning still follows `behavior_cloning.enabled`; the JSON contains
+statistics, not trained weights. Use statistics appropriate to the chosen network.
+Invalid or nonfinite cached statistics raise an error.
+
+Enable `training.policy_diagnostics.enabled` and set
+`training.policy_diagnostics.num_samples` to Q to record diagnostics in each
+`history.jsonl` entry. Each draw chooses an original-policy trajectory uniformly,
+then a pre-action event state uniformly within it, with replacement (not weighted
+by event duration). Streaming reservoirs keep memory bounded by Q queue vectors;
+sampling uses independent random streams and does not alter training draws.
+All actors receive the same complete queue vectors; their masked probabilities
+are compared separately for each of S expanded server rows.
+
+Diagnostics report the count and fraction of the Q*S server states with at most
+one compatible nonempty queue, and separate zero/one counts. For each tested
+perturbation (identified by partition), they report mean, maximum, and per-server
+mean total variation distance: `0.5 * sum(abs(perturbed_probs - original_probs))`.
+Distance 0 means identical distributions and 1 means disjoint distributions;
+`similarity` is one minus the mean distance. All distance and similarity metrics
+exclude server states with at most one compatible nonempty queue, including idle
+servers. `similarity_per_server_states` records the number included. Metrics are
+null when no eligible states exist (also per server); the retained
+`mean_total_variation_with_choice` field equals `mean_total_variation`.
+Comparisons use the actual perturbed actors before
+accepted updates are combined.
+
 Set `behavior_cloning.enabled: false` to skip behavioral cloning (default: true,
 including configs that omit the switch). The randomly initialized actor is
 still saved as `initial_policy.pt`, and its partition maxima are fixed for the
@@ -22,8 +57,12 @@ The actor uses WC PPO's hidden widths, Tanh activations and orthogonal gains
 (sqrt(2) for hidden weights, 0.01 for output weights, zero biases). It has no
 critic, reward scaling, or parameter normalization. Queue inputs use PPO WC's
 scalar observation standardization, fitted once after optional BC (see below).
-BC follows the rule in `RL/utils/eval.py` used by `vanilla_bc.yaml`: 100,000
-uniform integer queue vectors in [0,100], a queue-softmax WC teacher, MSE,
+BC uses 100,000 uniform integer queue vectors in [0,100] and a teacher with
+scores `queue_length[j] * service_rate[s, j]` for compatible queues, zero
+otherwise. Scores are divided by their per-server sum, without softmax or
+clipping. Pool replicas use their corresponding server's service rates.
+Zero-score rows use uniform probabilities over compatible nonempty queues,
+or all compatible queues if the server is idle. Training uses MSE,
 Adam at 0.0003, one pass, batches of 100. Sampling batches directly avoids the
 callback's actor-critic dependencies. Actor seeds are explicit; initialization
 has the same distribution as PPO, not identical RNG consumption from its critic.

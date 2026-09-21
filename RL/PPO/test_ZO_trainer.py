@@ -14,7 +14,7 @@ from RL.PPO.ZO_trainer import (ZOPolicy, ZerothOrderTrainer, evaluate_trajectory
                                install_streams, make_environment, paired_step,
                                parameter_partitions, perturbation_ratio,
                                pack_state, unpack_state, evaluate_packed_trajectory,
-                               evaluate_pretrain_trajectory)
+                               evaluate_pretrain_trajectory, policy_diagnostics)
 
 
 class ZOTests(unittest.TestCase):
@@ -29,6 +29,109 @@ class ZOTests(unittest.TestCase):
         self.env = dict(name='test', network=[[1, 1]], mu=[[2, 2]], h=[1, 1],
                         num_pool=1, init_queues=[1, 1], lam_type='constant',
                         lam_params={'val': [0.5, 0.5]}, queue_event_options=None, test_T=5)
+
+    def test_cached_pretrain_statistics(self):
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp) / 'pretrain_evaluation.json'
+            cache.write_text(json.dumps(dict(mean_queue_length=12., std_queue_length=3.)))
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+            with patch('RL.PPO.ZO_trainer.PRETRAIN_EVALUATION_PATH', cache), \
+                    patch('RL.PPO.ZO_trainer.evaluate_pretrain_trajectory', side_effect=AssertionError):
+                trainer.pre_train_eval()
+                self.assertEqual(float(trainer.policy.mean_queue_length), 12.)
+                self.assertEqual(float(trainer.policy.std_queue_length), 3.)
+                saved = torch.load(trainer.output_dir/'initial_policy.pt', weights_only=True)
+                self.assertEqual(float(saved['mean_queue_length']), 12.)
+                self.assertEqual(json.loads((trainer.output_dir/cache.name).read_text()), json.loads(cache.read_text()))
+                cache.write_text(json.dumps(dict(mean_queue_length=12., std_queue_length=-1.)))
+                with self.assertRaises(ValueError):
+                    trainer.pre_train_eval()
+
+    def test_pretrain_evaluation_disabled_uses_raw_queues(self):
+        self.config['pretrain_evaluation'] = {'enabled': False}
+        self.env['test_T'] = 0  # No pretraining evaluation horizon is required.
+        with tempfile.TemporaryDirectory() as temp:
+            cache = Path(temp)/'pretrain_evaluation.json'
+            cache.write_text('invalid JSON must not be read')
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+            trainer.policy.update_mean_std(12., 3.)
+            with patch('RL.PPO.ZO_trainer.PRETRAIN_EVALUATION_PATH', cache), \
+                    patch('RL.PPO.ZO_trainer.evaluate_pretrain_trajectory', side_effect=AssertionError):
+                trainer.pre_train_eval()
+            queues = torch.tensor([[0., 10.], [50., 100.]])
+            torch.testing.assert_close(trainer.policy.standardize_queues(queues), queues, rtol=0, atol=0)
+            restored = ZOPolicy(trainer.policy.network, scale=1)
+            restored.load_state_dict(torch.load(trainer.output_dir/'initial_policy.pt', weights_only=True))
+            torch.testing.assert_close(restored.standardize_queues(queues), queues, rtol=0, atol=0)
+            self.assertFalse((trainer.output_dir/'pretrain_evaluation.json').exists())
+
+    def test_pretrain_evaluation_switch_requires_boolean(self):
+        self.config['pretrain_evaluation'] = {'enabled': 'false'}
+        with tempfile.TemporaryDirectory() as temp, self.assertRaisesRegex(ValueError, 'pretrain_evaluation.enabled'):
+            ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+
+    def test_distribution_diagnostics(self):
+        original = ZOPolicy([[1, 1, 0], [0, 1, 1]], scale=1)
+        with torch.no_grad():
+            for parameter in original.parameters():
+                parameter.zero_()
+        candidate = copy.deepcopy(original)
+        with torch.no_grad():
+            candidate.action_net.bias.copy_(torch.tensor([0., 2., 0., 0., 0., 2.]))
+        queues = torch.tensor([[1., 0., 0.], [1., 1., 1.]])
+        result = policy_diagnostics([original, original, candidate], queues, [0, 1])
+        self.assertEqual(result['per_server_states'], 4)
+        self.assertEqual(result['at_most_one_nonempty'], 2)
+        self.assertEqual(result['zero_nonempty'], 1)
+        self.assertEqual(result['one_nonempty'], 1)
+        self.assertEqual(result['comparisons'][0]['similarity'], 1.)
+        expected = float(torch.sigmoid(torch.tensor(2.))) - 0.5
+        self.assertEqual(result['similarity_per_server_states'], 2)
+        self.assertAlmostEqual(result['comparisons'][1]['mean_total_variation'], expected)
+        self.assertAlmostEqual(result['comparisons'][1]['max_total_variation'], expected)
+        self.assertAlmostEqual(result['comparisons'][1]['similarity'], 1 - expected)
+        for distance in result['comparisons'][1]['per_server_mean_total_variation']:
+            self.assertAlmostEqual(distance, expected)
+        self.assertAlmostEqual(result['comparisons'][1]['mean_total_variation_with_choice'], expected)
+
+        excluded = policy_diagnostics([original, candidate], queues[:1], [1])
+        self.assertEqual(excluded['at_most_one_nonempty'], 2)
+        self.assertEqual(excluded['similarity_per_server_states'], 0)
+        comparison = excluded['comparisons'][0]
+        for key in ('similarity', 'mean_total_variation', 'max_total_variation',
+                    'mean_total_variation_with_choice'):
+            self.assertIsNone(comparison[key])
+        self.assertEqual(comparison['per_server_mean_total_variation'], [None, None])
+
+        mixed = policy_diagnostics([original, candidate], torch.tensor([[1., 1., 0.]]), [1])
+        self.assertEqual(mixed['similarity_per_server_states'], 1)
+        distances = mixed['comparisons'][0]['per_server_mean_total_variation']
+        self.assertAlmostEqual(distances[0], expected)
+        self.assertIsNone(distances[1])
+
+    def test_sampling_preserves_trajectory_and_supports_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+            job = (self.env, self.config, trainer.policy, trainer.states[0], 42)
+            score, state = evaluate_trajectory(job)
+            sampled_score, sampled_state, samples = evaluate_trajectory(job, sample_count=100, sample_seed=9)
+            self.assertEqual(score, sampled_score)
+            for name in ('queues', 'time', 'arrival_times'):
+                torch.testing.assert_close(getattr(state, name), getattr(sampled_state, name), rtol=0, atol=0)
+            self.assertEqual(samples.shape, (100, 2))
+            self.assertLess(len(torch.from_numpy(samples).unique(dim=0)), 100)
+            self.assertTrue((samples == evaluate_trajectory(job, sample_count=100, sample_seed=9)[2]).all())
+
+    def test_diagnostics_training_with_spawn(self):
+        self.config['training'].update(mode='vanilla', max_cpus=2, total_iterations=1,
+                                       policy_diagnostics={'enabled': True, 'num_samples': 7})
+        with tempfile.TemporaryDirectory() as temp:
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+            with patch.object(trainer, 'pre_train_eval'):
+                trainer.train()
+            record = json.loads((trainer.output_dir/'history.jsonl').read_text())
+            self.assertEqual(record['policy_diagnostics']['sampled_states'], 7)
+            self.assertEqual(len(record['policy_diagnostics']['comparisons']), len(record['active_partitions']))
 
     def test_partitions_and_scheduler(self):
         policy = ZOPolicy([[1, 1]], scale=1)
@@ -64,6 +167,23 @@ class ZOTests(unittest.TestCase):
             history = [json.loads(line) for line in (Path(temp)/'run/history.jsonl').read_text().splitlines()]
             self.assertEqual(len(history), 2)
             self.assertEqual(history[0]['para_maxima'], history[1]['para_maxima'])
+
+    def test_cloning_uses_queue_times_service_rate(self):
+        self.env.update(network=[[1, 1], [0, 1]], mu=[[2, 6], [0, 3]], num_pool=2)
+        self.config['behavior_cloning'].update(enabled=True, num_samples=3, batch_size=3, epochs=1)
+        queues = torch.tensor([[3., 1.], [0., 0.], [5., 0.]])
+        with tempfile.TemporaryDirectory() as temp:
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+            with patch('RL.PPO.ZO_trainer.np.random.randint', return_value=queues.numpy()), \
+                    patch('RL.PPO.ZO_trainer.F.mse_loss', wraps=torch.nn.functional.mse_loss) as loss:
+                trainer.pretrain()
+            target = loss.call_args.args[1]
+            expected = torch.tensor([
+                [[.5, .5], [.5, .5], [0., 1.], [0., 1.]],
+                [[.5, .5], [.5, .5], [0., 1.], [0., 1.]],
+                [[1., 0.], [1., 0.], [0., 1.], [0., 1.]],
+            ])
+            torch.testing.assert_close(target, expected)
 
     def test_partition_remainder_goes_to_last(self):
         policy = torch.nn.Linear(98, 1)  # 98 weights + one bias.

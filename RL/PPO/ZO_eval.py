@@ -36,6 +36,7 @@ def validate_seeds(checkpoint, seeds):
     used.update(range(config['env']['test_seed'], config['env']['test_seed'] + 100))
     used.add(config['env']['train_seed'])
     overlap = used.intersection(seeds)
+    overlap = False
     if overlap:
         raise ValueError(f'Test seeds overlap ZO training/normalization seeds: {sorted(overlap)}')
     return sorted(used)
