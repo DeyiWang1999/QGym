@@ -191,7 +191,15 @@ class parallel_eval(BaseCallback):
             self.behavior_cloning()
         # self.behavior_cloning()
         print('pre_train_eval')
-        # q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std = self.eval()
+        q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std = self.eval()
+        
+        self.test_costs.append([
+                            self.n_calls // self.eval_freq,
+                            q_mean.item(),
+                            q_std.item(),
+                            total_q_mean.item(),
+                            total_q_std.item()
+                        ])
 
         # self.model.policy.update_mean_std(mean_queue_length = q_mean, std_queue_length = q_std)
         # print(f"mean_queue_length: {self.model.policy.mean_queue_length}")
