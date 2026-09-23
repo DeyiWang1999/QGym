@@ -20,6 +20,7 @@ import torch
 from torch import nn
 from torch.nn import functional as F
 from torch.nn.utils import parameters_to_vector, vector_to_parameters
+from tqdm import tqdm
 
 from RL.utils.rl_env import load_rl_p_env
 from main.env import EnvState, Obs
@@ -455,20 +456,25 @@ class ZerothOrderTrainer:
         log_progress('Behavioral cloning started')
         optimizer = torch.optim.Adam(self.policy.parameters(), lr=bc['learning_rate'])
         self.policy.train()
-        for _ in range(bc['epochs']):
-            for offset in range(0, bc['num_samples'], bc['batch_size']):
-                size = min(bc['batch_size'], bc['num_samples'] - offset)
-                queues = torch.tensor(np.random.randint(0, 101, (size, self.policy.q))).float()
-                allocation = self.teacher_allocations(queues)
-                occupied = allocation.sum(-1, keepdim=True)
-                active = occupied.squeeze(-1) > 0
-                if not active.any():
-                    continue
-                target = allocation / occupied.clamp_min(1)
-                optimizer.zero_grad()
-                loss = F.mse_loss(self.policy.probabilities(queues)[active], target[active])
-                loss.backward()
-                optimizer.step()
+        with tqdm(total=bc['epochs'] * bc['num_samples'],
+                  desc='Behavioral cloning', unit='sample', dynamic_ncols=True) as progress:
+            for epoch in range(bc['epochs']):
+                progress.set_postfix(epoch=f"{epoch + 1}/{bc['epochs']}", refresh=False)
+                for offset in range(0, bc['num_samples'], bc['batch_size']):
+                    size = min(bc['batch_size'], bc['num_samples'] - offset)
+                    queues = torch.tensor(np.random.randint(0, 101, (size, self.policy.q))).float()
+                    allocation = self.teacher_allocations(queues)
+                    occupied = allocation.sum(-1, keepdim=True)
+                    active = occupied.squeeze(-1) > 0
+                    if active.any():
+                        target = allocation / occupied.clamp_min(1)
+                        optimizer.zero_grad()
+                        loss = F.mse_loss(self.policy.probabilities(queues)[active], target[active])
+                        loss.backward()
+                        optimizer.step()
+                        progress.set_postfix(epoch=f"{epoch + 1}/{bc['epochs']}",
+                                             loss=f'{loss.item():.6f}', refresh=False)
+                    progress.update(size)
         self.policy.eval()
         torch.save(self.policy.state_dict(), self.output_dir / 'initial_policy.pt')
         log_progress(f'Behavioral cloning finished; initial policy saved to {self.output_dir / "initial_policy.pt"}')
