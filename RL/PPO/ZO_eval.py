@@ -73,7 +73,7 @@ def load_selected_checkpoint(path):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('checkpoint_dir', type=Path, nargs='?', default=Path(__file__).parent / 'reentrant_9')
-    parser.add_argument('--test-seed', type=int, default=3003)
+    parser.add_argument('--test-seed', type=int, default=42)
     parser.add_argument('--indices', type=int, nargs='+', default=list(range(0, 101, 10)))
     parser.add_argument('--include-final', action='store_true', help='Also evaluate final_policy.pt using original_000000.pt metadata')
     parser.add_argument('--output', type=Path)
