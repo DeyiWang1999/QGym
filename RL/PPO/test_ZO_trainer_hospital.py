@@ -121,6 +121,27 @@ class HospitalZOTests(unittest.TestCase):
                 self.assertEqual(history['policy_diagnostics']['servers'], 2)
                 self.assertTrue((trainer.output_dir / 'final_policy.pt').is_file())
 
+    def test_training_resets_all_trajectories_at_test_horizon(self):
+        self.env['test_T'] = 11  # Floor division gives two iterations per reset.
+        self.config['training'].update(total_iterations=3, mode='vanilla')
+        self.config['behavior_cloning']['enabled'] = False
+        with tempfile.TemporaryDirectory() as temp:
+            trainer = ZerothOrderTrainer(self.env, self.config, Path(temp) / 'run')
+            trainer.train()
+            checkpoints = [torch.load(trainer.output_dir / f'original_{i:06d}.pt',
+                                      weights_only=False) for i in range(3)]
+            for state in checkpoints[0]['initial_states']:
+                torch.testing.assert_close(state.queues, torch.tensor([[2., 2.]]))
+            for state in checkpoints[1]['initial_states']:
+                self.assertGreater(float(state.time), 0.)
+            for state, seed in zip(checkpoints[2]['initial_states'], trainer.seeds):
+                self.assertEqual(float(state.queues.sum()), 0.)
+                self.assertEqual(float(state.time), 0.)
+                self.assertTrue(all(not jobs for jobs in state.service_times))
+                env = make_environment(self.env, self.config, seed)
+                env.reset()
+                torch.testing.assert_close(state.arrival_times, env.env_state.arrival_times)
+
     def test_repository_hospital(self):
         root = Path(__file__).resolve().parents[2]
         env_config = yaml.safe_load((root / 'configs/env/hospital.yaml').read_text())

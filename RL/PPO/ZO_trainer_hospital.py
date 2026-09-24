@@ -375,6 +375,12 @@ class ZerothOrderTrainer:
         for key in ('total_iterations', 'evaluation_trajectories', 'evaluation_length', 'max_cpus'):
             if not isinstance(t[key], int) or t[key] <= 0:
                 raise ValueError(f'{key} must be a positive integer')
+        test_T = self.env_config['test_T']
+        if not isinstance(test_T, int) or test_T <= 0:
+            raise ValueError('env.test_T must be a positive integer')
+        self.reset_interval = test_T // t['evaluation_length']
+        if self.reset_interval < 1:
+            raise ValueError('env.test_T must be at least evaluation_length')
         if not (0 < t['ending_perturbation_ratio'] <= t['initial_perturbation_ratio']
                 and math.isfinite(t['initial_perturbation_ratio'])):
             raise ValueError('Require finite 0 < ending_perturbation_ratio <= initial_perturbation_ratio')
@@ -497,6 +503,15 @@ class ZerothOrderTrainer:
         pool = ProcessPoolExecutor(workers, mp_context=mp.get_context('spawn')) if workers > 1 else None
         try:
             for iteration in range(self.training['total_iterations']):
+                if iteration > 0 and iteration % self.reset_interval == 0:
+                    # Every policy's trajectory starts from these shared states.
+                    # A full reset clears jobs, elapsed time, and residual clocks.
+                    self.states = []
+                    for seed in self.seeds:
+                        env = make_environment(self.env_config, self.config, seed)
+                        env.reset()
+                        self.states.append(copy.deepcopy(env.env_state))
+                    log_progress('Reset all training trajectories to empty environments')
                 label = f"Training iteration {iteration + 1}/{self.training['total_iterations']}"
                 log_progress(f'{label} in progress')
                 ratio = perturbation_ratio(self.training, iteration)

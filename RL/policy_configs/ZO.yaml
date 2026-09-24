@@ -11,7 +11,8 @@ model:
   scale: 10
 behavior_cloning:
   enabled: true # Set false to start ZO directly from the initialized actor.
-  num_samples: 1000000
+  # num_samples: 1000000 # reentrant-9
+  num_samples: 2000000
   batch_size: 100
   epochs: 1
   learning_rate: 0.0003
