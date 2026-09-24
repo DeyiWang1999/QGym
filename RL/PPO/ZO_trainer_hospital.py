@@ -504,6 +504,10 @@ class ZerothOrderTrainer:
         try:
             for iteration in range(self.training['total_iterations']):
                 if iteration > 0 and iteration % self.reset_interval == 0:
+                    first_seed = max(self.seeds) + 1
+                    if first_seed + len(self.seeds) > 2**32:
+                        raise ValueError('No unused uint32 seeds remain for training trajectories')
+                    self.seeds = list(range(first_seed, first_seed + len(self.seeds)))
                     # Every policy's trajectory starts from these shared states.
                     # A full reset clears jobs, elapsed time, and residual clocks.
                     self.states = []
@@ -511,7 +515,8 @@ class ZerothOrderTrainer:
                         env = make_environment(self.env_config, self.config, seed)
                         env.reset()
                         self.states.append(copy.deepcopy(env.env_state))
-                    log_progress('Reset all training trajectories to empty environments')
+                    log_progress('Reset all training trajectories to empty environments '
+                                 f'with fresh seeds {self.seeds[0]}..{self.seeds[-1]}')
                 label = f"Training iteration {iteration + 1}/{self.training['total_iterations']}"
                 log_progress(f'{label} in progress')
                 ratio = perturbation_ratio(self.training, iteration)
