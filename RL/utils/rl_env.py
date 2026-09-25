@@ -188,9 +188,21 @@ def load_rl_p_env(env_config, temp, batch, seed, policy_name, device):
 
         interarrivals = torch.tensor(inter_arrival_dists(self.state, self.batch, time)).to(self.device)
         return interarrivals
-    
+    '''
     def draw_service(self, time):
         def service_dists(state, batch, t):
+            return state.exponential(1, (batch, orig_q))
+        service = torch.tensor(service_dists(self.state, self.batch, time)).to(self.device)
+        return service
+    '''
+    def draw_service(self, time):
+        def service_dists(state, batch, t):
+            if "service_type" in env_config.keys() and env_config['service_type'] == 'hyper':
+                scale = 0.8
+                coins = state.binomial(1,0.5, size = (batch, orig_q))
+                a = state.exponential((1 + scale), (batch, orig_q))
+                b = state.exponential((1 - scale), (batch, orig_q))
+                return coins * a + (1 - coins) * b
             return state.exponential(1, (batch, orig_q))
         service = torch.tensor(service_dists(self.state, self.batch, time)).to(self.device)
         return service
