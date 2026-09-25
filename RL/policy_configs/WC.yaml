@@ -24,7 +24,8 @@ training:
   per_iter_normal_obs: False
   per_iter_normal_value: False
   actors: 50
-  episode_steps: 54000
+  # episode_steps: 54000 # reentrant-9-fair
+  episode_steps: 50000
   num_epochs: 100 
   train_batch: 1
   test_batch: 100

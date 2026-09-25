@@ -165,6 +165,8 @@ def load_rl_p_env(env_config, temp, batch, seed, policy_name, device):
     def lam(t):
             if lam_type == 'constant':
                 lam = lam_r
+            elif lam_type == 'hyper':
+                lam = lam_r
             elif lam_type == 'step':
                 is_surge = 1*(t.data.cpu().numpy() <= lam_params['t_step'])
                 lam = is_surge * np.array(lam_params['val1']) + (1 - is_surge) * np.array(lam_params['val2'])

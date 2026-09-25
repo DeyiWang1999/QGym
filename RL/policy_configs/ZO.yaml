@@ -12,7 +12,8 @@ model:
 behavior_cloning:
   enabled: true # Set false to start ZO directly from the initialized actor.
   # num_samples: 1000000 # reentrant-9
-  num_samples: 2000000
+  # num_samples: 2000000 # hospital
+  num_samples: 1000000
   batch_size: 100
   epochs: 1
   learning_rate: 0.0003
@@ -28,7 +29,8 @@ training:
   partition_count: 2 # Floor-sized partitions; all remaining parameters go in the last.
   evaluation_trajectories: 10
   # evaluation_length: 30000 # External arrivals, not total simulator events. # reentrant-9
-  evaluation_length: 5000
+  # evaluation_length: 5000 # hospital
+  evaluation_length: 27000
   evaluation_seeds: null # Consecutive distinct seeds starting at env.test_seed.
   initial_queues: null # Optional list of queue vectors, one per trajectory.
   update_ratio: 0.2
