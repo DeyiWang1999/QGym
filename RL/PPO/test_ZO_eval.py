@@ -2,6 +2,7 @@ import copy
 from pathlib import Path
 import sys
 import unittest
+from unittest.mock import patch
 from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -17,6 +18,39 @@ from RL.utils.rl_env import load_rl_p_env
 
 
 class EvaluationTests(unittest.TestCase):
+    def test_holding_cost_metrics_and_callback_records(self):
+        policy = SimpleNamespace(update_mean_std=lambda **kwargs: None,
+                                 mean_queue_length=0., std_queue_length=1.)
+        callback = evaluation.parallel_eval(
+            SimpleNamespace(policy=policy), [SimpleNamespace(seed=1), SimpleNamespace(seed=2)],
+            1, 10, 'softmax', 1, torch.zeros(1, 2), 2, 'cpu', 1,
+            False, 'WC', False, 'test', False)
+        # Queue means [1, 2] and [3, 4], holding weights [2, 5]:
+        # total holding costs are 12 and 26, with unequal elapsed times.
+        results = [(np.array([[24.]]), np.array([[2., 4.]]), np.array([[2.]])),
+                   (np.array([[104.]]), np.array([[12., 16.]]), np.array([[4.]]))]
+        with patch.object(evaluation, 'ProcessPoolExecutor') as executor:
+            executor.return_value.__enter__.return_value.submit.return_value.result.side_effect = results
+            metrics = callback.eval()
+        self.assertEqual(len(metrics), 10)
+        self.assertEqual(float(metrics[6]), 5.)
+        self.assertEqual(float(metrics[8]), 19.)
+        self.assertAlmostEqual(float(metrics[9]), np.std([12., 26.], ddof=1))
+        with patch.object(callback, 'eval', return_value=metrics):
+            callback.pre_train_eval()
+            for normalize in (False, True):
+                callback.per_iter_normal_obs = normalize
+                self.assertTrue(callback._on_step())
+        for record in callback.test_costs:
+            self.assertEqual(len(record), 7)
+            self.assertEqual(record[-2:], [float(metrics[8]), float(metrics[9])])
+        callback.eval_env = callback.eval_env[:1]
+        with patch.object(evaluation, 'ProcessPoolExecutor') as executor:
+            executor.return_value.__enter__.return_value.submit.return_value.result.return_value = results[0]
+            metrics = callback.eval()
+        self.assertEqual(float(metrics[8]), 12.)
+        self.assertEqual(float(metrics[9]), 0.)
+
     def test_schedule_follows_network_test_horizon(self):
         for name, base in [('reentrant_9', 300000), ('reentrant_2', 12000)]:
             config = dict(name=name, test_T=base)

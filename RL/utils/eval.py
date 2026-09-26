@@ -191,14 +191,17 @@ class parallel_eval(BaseCallback):
             self.behavior_cloning()
         # self.behavior_cloning()
         print('pre_train_eval')
-        q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std = self.eval()
+        (q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std,
+         total_holding_cost_mean, total_holding_cost_std) = self.eval()
         
         self.test_costs.append([
                             self.n_calls // self.eval_freq,
                             q_mean.item(),
                             q_std.item(),
                             total_q_mean.item(),
-                            total_q_std.item()
+                            total_q_std.item(),
+                            total_holding_cost_mean.item(),
+                            total_holding_cost_std.item()
                         ])
 
         # self.model.policy.update_mean_std(mean_queue_length = q_mean, std_queue_length = q_std)
@@ -210,7 +213,8 @@ class parallel_eval(BaseCallback):
     def _on_step(self) -> bool:
         if self.per_iter_normal_obs:
             if (self.n_calls) % self.eval_freq == 0:
-                q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std = self.eval()
+                (q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std,
+                 total_holding_cost_mean, total_holding_cost_std) = self.eval()
 
                 self.model.policy.update_mean_std(mean_queue_length = q_mean, std_queue_length = q_std)
                 print(f"mean_queue_length: {self.model.policy.mean_queue_length}")
@@ -221,11 +225,14 @@ class parallel_eval(BaseCallback):
                                     q_mean.item(),
                                     q_std.item(),
                                     total_q_mean.item(),
-                                    total_q_std.item()
+                                    total_q_std.item(),
+                                    total_holding_cost_mean.item(),
+                                    total_holding_cost_std.item()
                                 ])
         else:
             if (self.n_calls) % self.eval_freq == 0:
-                q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std = self.eval()
+                (q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std,
+                 total_holding_cost_mean, total_holding_cost_std) = self.eval()
                 print(f"mean_queue_length: {q_mean.item()}")
                 print(f"std_queue_length: {q_std.item()}")
                 self.test_costs.append([
@@ -233,7 +240,9 @@ class parallel_eval(BaseCallback):
                                     q_mean.item(),
                                     q_std.item(),
                                     total_q_mean.item(),
-                                    total_q_std.item()
+                                    total_q_std.item(),
+                                    total_holding_cost_mean.item(),
+                                    total_holding_cost_std.item()
                                 ])
 
         return True
@@ -290,8 +299,12 @@ class parallel_eval(BaseCallback):
         # Test cost metrics
         # pdb.set_trace()
         test_cost_batch = [total_cost_batch[test_dq_idx] / time_batch[test_dq_idx] for test_dq_idx in range(len(test_dq_batch))]
-        test_cost = torch.mean(torch.concat(test_cost_batch))
-        test_std = torch.std(torch.concat(test_cost_batch))
+        # Each accumulated cost already sums holding costs over all queues.
+        trajectory_holding_costs = torch.cat([cost.reshape(-1) for cost in test_cost_batch])
+        total_holding_cost_mean = trajectory_holding_costs.mean()
+        total_holding_cost_std = (trajectory_holding_costs.std()
+                                  if trajectory_holding_costs.numel() > 1
+                                  else torch.zeros_like(total_holding_cost_mean))
         trajectory_queue_means = torch.concat([
             queue_integrals / elapsed
             for queue_integrals, elapsed in zip(time_weight_queue_len_batch, time_batch)
@@ -307,8 +320,8 @@ class parallel_eval(BaseCallback):
         print(f"queue lengths: \t{test_queue_len}")
         print(f"total queue length mean: \t{total_q_mean}")
         print(f"total queue length std: \t{total_q_std}")
-        print(f"test cost: \t{test_cost}")
-        print(f"test cost std: \t{test_std}")
+        print(f"total holding cost mean: \t{total_holding_cost_mean}")
+        print(f"total holding cost std: \t{total_holding_cost_std}")
 
 
         test_queue_len = torch.tensor(test_queue_len)
@@ -323,7 +336,8 @@ class parallel_eval(BaseCallback):
         t_std = (torch.std(elapsed_times) if elapsed_times.numel() > 1
                  else torch.zeros_like(t_mean))
         
-        return q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std
+        return (q_mean, q_std, t_mean, t_max, t_min, t_std, total_q_mean, total_q_std,
+                total_holding_cost_mean, total_holding_cost_std)
 
     def construct_batch(self):
         lex_batch = []

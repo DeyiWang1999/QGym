@@ -133,7 +133,8 @@ def main():
         if not all(torch.isfinite(value).all() for value in values):
             raise RuntimeError(f'Nonfinite metrics for {path.name}')
         names = ('queue_mean', 'queue_std_across_queues', 'time_mean', 'time_max',
-                 'time_min', 'time_std', 'total_queue_mean', 'total_queue_std')
+                 'time_min', 'time_std', 'total_queue_mean', 'total_queue_std',
+                 'total_holding_cost_mean', 'total_holding_cost_std')
         records.append(dict(checkpoint=path.name, metrics=dict(zip(names, map(float, values))),
                             environment=env_config['name'], base_test_T=env_config['test_T'],
                             events_per_environment=eval_t,
