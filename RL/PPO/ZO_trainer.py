@@ -234,7 +234,7 @@ def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_see
                     f'Invalid event duration: dt={dt!r}, seed={seed}, '
                     f'arrivals={arrivals}, event={env.st_argmin.index}, '
                     f'time={env.env_state.time.tolist()}')
-            integral += float(queues.sum()) * dt
+            integral += float(info['cost'])
             elapsed += dt
             event = env.st_argmin.index
             arrivals += int(event < env.q and
