@@ -30,7 +30,9 @@ training:
   evaluation_trajectories: 10
   # evaluation_length: 30000 # External arrivals, not total simulator events. # reentrant-9
   # evaluation_length: 5000 # hospital
-  evaluation_length: 27000
+  # evaluation_length: 27000 # reentrant-5-hyper
+  # evaluation_length: 1000 # criss-cross_bh
+  evaluation_length: 1000
   evaluation_seeds: null # Consecutive distinct seeds starting at env.test_seed.
   initial_queues: null # Optional list of queue vectors, one per trajectory.
   update_ratio: 0.2
