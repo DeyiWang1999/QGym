@@ -1,6 +1,7 @@
 import copy
 import multiprocessing
 from concurrent.futures import ProcessPoolExecutor
+from pathlib import Path
 
 import cloudpickle
 
@@ -26,6 +27,30 @@ from stable_baselines3.common.policies import ActorCriticPolicy
 from stable_baselines3.common.type_aliases import GymEnv, MaybeCallback, Schedule
 from stable_baselines3.common.utils import obs_as_tensor, safe_mean
 from stable_baselines3.common.vec_env import VecEnv
+from RL.utils.eval import parallel_eval
+
+
+class SavingPolicyEval(parallel_eval):
+    """Save every evaluated policy, including the pre-training evaluation.
+
+    Load a trusted checkpoint with ``cloudpickle.load(file)``. Saving the full
+    CPU policy preserves normalization and other attributes outside state_dict.
+    """
+
+    def __init__(self, *args, output_dir, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.output_dir = Path(output_dir)
+        self.output_dir.mkdir(parents=True, exist_ok=True)
+
+    def eval(self):
+        # Save before _on_step can update normalization from evaluation metrics.
+        path = self.output_dir / f'policy_eval_{self.iter:06d}.pkl'
+        policy = _rollout_cpu_copy(self.model.policy)
+        policy.set_training_mode(False)
+        with path.open('wb') as checkpoint:
+            cloudpickle.dump(policy, checkpoint)
+        print(f'Saved evaluated policy to {path}', flush=True)
+        return super().eval()
 
 
 

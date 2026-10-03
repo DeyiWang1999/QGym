@@ -26,8 +26,7 @@ import yaml
 from utils.rl_env import load_rl_p_env
 from policies.WC_policy import WC_Policy
 from policies.vanilla_policy import Vanilla_Policy
-from utils.eval import parallel_eval
-from trainer import CustomPPOTrainer
+from trainer import CustomPPOTrainer, SavingPolicyEval
 from utils.rollout_buffer import CustomRolloutBuffer
 from stable_baselines3.common.vec_env import DummyVecEnv
 
@@ -35,6 +34,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv
 def main():
     config_file_name = sys.argv[1]  
     env_config_name = sys.argv[2]
+    output_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), f'{env_config_name}_PPO')
+    os.makedirs(output_dir, exist_ok=True)
 
     if not config_file_name.endswith('.yaml'):
         config_file_name += '.yaml'
@@ -128,7 +129,7 @@ def main():
     ppo_batch_size = config['training']['batch_size']
     ppo_epochs = config['training']['ppo_epochs']
     train_batch = config['training']['train_batch']
-    test_batch = config['training']['test_batch']
+    test_batch = 400
     clip_range_vf = config['training']['clip_range_vf']
     ent_coef = config['training']['ent_coef']
     bc = config['training']['behavior_cloning']
@@ -182,7 +183,7 @@ def main():
 
 
     # Test Env
-    dq_test_list = [make_test_env(seed) for seed in range(test_seed, test_seed + 100)]
+    dq_test_list = [make_test_env(seed) for seed in range(test_seed, test_seed + test_batch)]
 
     # model kwargs
     L = orig_q
@@ -229,7 +230,7 @@ def main():
     # def eval call back
 
     eval_env = dq_test_list 
-    eval_callback = parallel_eval(model = model, eval_env = eval_env, eval_freq = eval_freq, eval_t = test_T, test_policy = test_policy, test_seed = test_seed, init_test_queues = init_test_queues, test_batch = test_batch, device = device, num_pool = num_pool, time_f = time_f, randomize = randomize, policy_name = policy_name, per_iter_normal_obs = per_iter_normal_obs, env_config_name = env_config_name, bc = bc, verbose = 1)
+    eval_callback = SavingPolicyEval(output_dir = output_dir, model = model, eval_env = eval_env, eval_freq = eval_freq, eval_t = test_T, test_policy = test_policy, test_seed = test_seed, init_test_queues = init_test_queues, test_batch = test_batch, device = device, num_pool = num_pool, time_f = time_f, randomize = randomize, policy_name = policy_name, per_iter_normal_obs = per_iter_normal_obs, env_config_name = env_config_name, bc = bc, verbose = 1)
 
     eval_callback.pre_train_eval()
                                      
@@ -240,7 +241,7 @@ def main():
     final_cost_list = eval_callback.final_costs
 
     # Store the lists
-    with open('test_cost_list.json', 'w') as f:
+    with open(os.path.join(output_dir, 'test_cost_list.json'), 'w') as f:
         json.dump(test_cost_list, f)
 
 

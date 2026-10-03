@@ -81,7 +81,7 @@ def main():
                         help="Run 5 times the checkpoint's test_T; record cumulative queue mean/std every test_T events")
     parser.add_argument('--check-only', action='store_true', help='Validate files and seed separation without rollouts')
     args = parser.parse_args()
-    seeds = list(range(args.test_seed, args.test_seed + 100))
+    seeds = list(range(args.test_seed, args.test_seed + 400))
     if not 0 <= seeds[0] <= seeds[-1] < 2**32:
         parser.error('Test seeds must be uint32 values')
     paths = [args.checkpoint_dir / f'original_{i:06d}.pt' for i in args.indices]
@@ -105,7 +105,7 @@ def main():
               f'{eval_t} events; milestones={milestones}', flush=True)
         del checkpoint, env_config
         gc.collect()
-    print(f'Validated {len(jobs)} policies; 100 environments; seeds {seeds[0]}–{seeds[-1]}', flush=True)
+    print(f'Validated {len(jobs)} policies; {len(seeds)} environments; seeds {seeds[0]}–{seeds[-1]}', flush=True)
     if args.check_only:
         return
     torch.set_num_threads(1)
@@ -124,7 +124,7 @@ def main():
         evaluator = parallel_eval(
             model=SimpleNamespace(policy=policy), eval_env=envs, eval_freq=1,
             eval_t=eval_t, test_policy='softmax', test_seed=args.test_seed,
-            init_test_queues=torch.tensor([env_config['init_queues']]), test_batch=100,
+            init_test_queues=torch.tensor([env_config['init_queues']]), test_batch=len(seeds),
             device='cpu', num_pool=1, time_f=False, policy_name='WC',
             per_iter_normal_obs=False, env_config_name=env_config['name'], bc=False,
             seed_actions=True, milestones=milestones)
