@@ -79,9 +79,14 @@ class FluidPolicy:
             self.start_time = batch_time.detach()
 
             batch_obs = [(batch_queue[idx], batch_time[idx]) for idx in range(len(batch_time))]
-
-            with Pool(10) as pool:
-                results = pool.starmap(solve_fluid, [(obs, self.H, s, q, h, mu, self.queue_event_options, self.delta_t) for obs in batch_obs])
+                
+            jobs = [(obs, self.H, s, q, h, mu, self.queue_event_options, self.delta_t) for obs in batch_obs]
+            if len(jobs) == 1:
+                # The trainer already parallelizes independent environments.
+                results = [solve_fluid(*jobs[0])]
+            else:
+                with Pool(10) as pool:
+                    results = pool.starmap(solve_fluid, jobs)
 
             self.plan, self.cost = zip(*results)
             self.plan = torch.stack(self.plan)

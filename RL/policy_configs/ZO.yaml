@@ -22,6 +22,7 @@ pretrain_evaluation:
 training:
   mode: split_layer # vanilla, partitioned, split_layer
   total_iterations: 100
+  # total_iterations: 100 # n-model
   initial_perturbation_ratio: 0.5
   ending_perturbation_ratio: 0.1
   perturbation_scheduler: logarithmic # geometric decay; also linear or cosine
@@ -32,7 +33,10 @@ training:
   # evaluation_length: 5000 # hospital
   # evaluation_length: 27000 # reentrant-5-hyper
   # evaluation_length: 1000 # criss-cross_bh
-  evaluation_length: 1000
+  # evaluation_length: 1000 # n-model
+  # evaluation_length: 10000 # criss-cross_bh_vanilla
+  evaluation_length: 2200 # criss-cross_bh_split
+  # evaluation_length: 1000 # n-model-vanilla
   evaluation_seeds: null # Consecutive distinct seeds starting at env.test_seed.
   initial_queues: null # Optional list of queue vectors, one per trajectory.
   update_ratio: 0.2

@@ -24,11 +24,14 @@ training:
   per_iter_normal_obs: False
   per_iter_normal_value: False
   actors: 50
-  episode_steps: 54000 # reentrant-9-fair
+  # episode_steps: 54000 # reentrant-9-fair
   # episode_steps: 50000 # reentrant-5-hyper-fair, original
   # episode_steps: 1800 # criss-cross-fair
   # episode_steps: 1800 # N-model-fair
-  num_epochs: 100 
+  # episode_steps: 4000 # criss-corss-vanilla
+  episode_steps: 400 # N-model-vanilla
+  # num_epochs: 100
+  num_epochs: 100 # N-model-vanilla
   train_batch: 1
   test_batch: 100
   lr: 0.0003 

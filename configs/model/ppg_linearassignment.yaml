@@ -4,7 +4,8 @@ env:
   env_temp: 1
   straight_through_min: True
   model_seed: 100
-  test_seed: 42
+  #test_seed: 42
+  test_seed: 142
   train_seed: 42
   print_grads: True
   test_restart: True
@@ -17,7 +18,7 @@ param:
 opt:
   num_epochs: 200
   train_batch: 1
-  test_batch: 100
+  test_batch: 400
   lr: 0.0001
   betas: [0.8, 0.9]
   grad_clip_norm: 1.0
