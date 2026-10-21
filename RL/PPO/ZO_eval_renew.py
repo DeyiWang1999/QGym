@@ -1,4 +1,4 @@
-"""Evaluate ZO actors until S returns to empty, capped at 10*test_T.
+"""Evaluate ZO actors until S returns to empty, capped at a configurable multiple of test_T.
 
 Randomness is indexed by external queue arrival and by server's newly started
 job (first service assignment). Service draws are unit-rate WORK, as in QGym:
@@ -32,11 +32,13 @@ from RL.PPO.ZO_eval import (
 from RL.utils.rl_env import load_rl_p_env
 
 
-def evaluation_schedule(env_config, ranking_check):
-    """Use a tenfold cap; optionally report each original-horizon milestone."""
+def evaluation_schedule(env_config, ranking_check, horizon_multiplier=10):
+    """Scale the cap; optionally report each original-horizon milestone."""
+    if type(horizon_multiplier) is not int or horizon_multiplier < 1:
+        raise ValueError("horizon_multiplier must be a positive integer")
     base, _ = original_evaluation_schedule(env_config, False)
-    milestones = [base * i for i in range(1, 11)] if ranking_check else None
-    return 10 * base, milestones
+    milestones = [base * i for i in range(1, horizon_multiplier + 1)] if ranking_check else None
+    return horizon_multiplier * base, milestones
 
 
 class RenewalEnvironment:
@@ -232,12 +234,16 @@ def main():
     parser.add_argument('--output', type=Path)
     parser.add_argument('--empty-returns', '--S', '-S', type=int, default=1, metavar='S',
                         help='Stop after S returns to all-empty queues (positive integer; default: 1)')
+    parser.add_argument('--horizon-multiplier', type=int, default=10, metavar='K',
+                        help='Cap each trajectory at K * test_T events (positive integer; default: 10)')
     parser.add_argument('--ranking-check', action='store_true',
-                        help="Cap at 10*test_T; report stopped trajectories at each test_T milestone")
+                        help="Report stopped trajectories at each test_T milestone up to the configured cap")
     parser.add_argument('--check-only', action='store_true', help='Validate files and seed separation without rollouts')
     args = parser.parse_args()
     if args.empty_returns < 1:
         parser.error('--empty-returns / --S must be a positive integer')
+    if args.horizon_multiplier < 1:
+        parser.error('--horizon-multiplier must be a positive integer')
     seeds = list(range(args.test_seed, args.test_seed + 400))
     if not 0 <= seeds[0] <= seeds[-1] < 2**32:
         parser.error('Test seeds must be uint32 values')
@@ -253,11 +259,11 @@ def main():
         checkpoint = load_selected_checkpoint(path)
         used = validate_seeds(checkpoint, seeds)
         env_config = checkpoint['env_config']
-        evaluation_schedule(env_config, args.ranking_check)
+        evaluation_schedule(env_config, args.ranking_check, args.horizon_multiplier)
         if env_config['num_pool'] != 1:
             raise ValueError(f'{path}: PPO-compatible evaluation currently requires num_pool=1')
         jobs.append(path)
-        eval_t, milestones = evaluation_schedule(env_config, args.ranking_check)
+        eval_t, milestones = evaluation_schedule(env_config, args.ranking_check, args.horizon_multiplier)
         print(f'{path.name}: {env_config["name"]}; base test_T={env_config["test_T"]}; '
               f'cap={eval_t} events; target empty returns={args.empty_returns}; milestones={milestones}', flush=True)
         del checkpoint, env_config
@@ -273,7 +279,7 @@ def main():
         checkpoint = load_selected_checkpoint(path)
         used = validate_seeds(checkpoint, seeds)
         config, env_config = checkpoint['config'], checkpoint['env_config']
-        eval_t, milestones = evaluation_schedule(env_config, args.ranking_check)
+        eval_t, milestones = evaluation_schedule(env_config, args.ranking_check, args.horizon_multiplier)
         state = checkpoint['policy_state_dict']
         policy = EvaluationPolicy(state['network'], config['model']['scale'])
         policy.load_state_dict(state, strict=True)
@@ -285,6 +291,7 @@ def main():
         records.append(dict(checkpoint=path.name, metrics=metrics,
                             environment=env_config['name'], base_test_T=env_config['test_T'],
                             events_per_environment=eval_t,
+                            horizon_multiplier=args.horizon_multiplier,
                             target_empty_returns=args.empty_returns,
                             excluded_training_seeds=used,
                             trajectory_steps=lengths, returned_empty=returned,
@@ -299,6 +306,7 @@ def main():
         output.write_text(json.dumps(dict(environment=next(iter(environments)) if len(environments) == 1 else None,
                                          events_per_environment=next(iter(horizons)) if len(horizons) == 1 else None,
                                          ranking_check=args.ranking_check,
+                                         horizon_multiplier=args.horizon_multiplier,
                                          stopping_rule='S_returns_to_empty_or_event_cap',
                                          target_empty_returns=args.empty_returns,
                                          returned_empty_definition='reached_target_empty_returns',
