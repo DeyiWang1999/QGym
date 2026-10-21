@@ -1,4 +1,4 @@
-"""Evaluate ZO actors until the first positive-time empty state, capped at test_T.
+"""Evaluate ZO actors until the first positive-time empty state, capped at 10*test_T.
 
 Randomness is indexed by external queue arrival and by server's newly started
 job (first service assignment). Service draws are unit-rate WORK, as in QGym:
@@ -26,9 +26,17 @@ import cloudpickle
 import numpy as np
 import torch
 from RL.PPO.ZO_eval import (
-    EvaluationPolicy, evaluation_schedule, load_selected_checkpoint, validate_seeds,
+    EvaluationPolicy, evaluation_schedule as original_evaluation_schedule,
+    load_selected_checkpoint, validate_seeds,
 )
 from RL.utils.rl_env import load_rl_p_env
+
+
+def evaluation_schedule(env_config, ranking_check):
+    """Use a tenfold cap; optionally report each original-horizon milestone."""
+    base, _ = original_evaluation_schedule(env_config, False)
+    milestones = [base * i for i in range(1, 11)] if ranking_check else None
+    return 10 * base, milestones
 
 
 class RenewalEnvironment:
@@ -215,7 +223,7 @@ def main():
     parser.add_argument('--include-final', action='store_true', help='Also evaluate final_policy.pt using original_000000.pt metadata')
     parser.add_argument('--output', type=Path)
     parser.add_argument('--ranking-check', action='store_true',
-                        help="Cap at 5*test_T; report stopped trajectories at each test_T milestone")
+                        help="Cap at 10*test_T; report stopped trajectories at each test_T milestone")
     parser.add_argument('--check-only', action='store_true', help='Validate files and seed separation without rollouts')
     args = parser.parse_args()
     seeds = list(range(args.test_seed, args.test_seed + 400))
