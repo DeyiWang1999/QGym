@@ -4,7 +4,8 @@ env:
   env_temp: 1.0
   straight_through_min: False
   model_seed: 100
-  test_seed: 42
+  # test_seed: 42
+  test_seed: 142
   train_seed: 3003
   randomize: True 
   time_f: False 
@@ -27,9 +28,9 @@ training:
   # episode_steps: 54000 # reentrant-9-fair
   # episode_steps: 50000 # reentrant-5-hyper-fair, original
   # episode_steps: 1800 # criss-cross-fair
-  # episode_steps: 1800 # N-model-fair
+  episode_steps: 1800 # N-model-fair
   # episode_steps: 4000 # criss-corss-vanilla
-  episode_steps: 400 # N-model-vanilla
+  # episode_steps: 400 # N-model-vanilla
   # num_epochs: 100
   num_epochs: 100 # N-model-vanilla
   train_batch: 1

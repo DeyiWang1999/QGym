@@ -20,7 +20,7 @@ behavior_cloning:
 pretrain_evaluation:
   enabled: false # Set false to skip evaluation/cache loading and use raw queue inputs.
 training:
-  mode: split_layer # vanilla, partitioned, split_layer
+  mode: vanilla # vanilla, partitioned, split_layer
   total_iterations: 100
   # total_iterations: 100 # n-model
   initial_perturbation_ratio: 0.5
@@ -34,8 +34,9 @@ training:
   # evaluation_length: 27000 # reentrant-5-hyper
   # evaluation_length: 1000 # criss-cross_bh
   # evaluation_length: 1000 # n-model
+  evaluation_length: 4500 # n-model-vanilla
   # evaluation_length: 10000 # criss-cross_bh_vanilla
-  evaluation_length: 2200 # criss-cross_bh_split
+  # evaluation_length: 2200 # criss-cross_bh_split
   # evaluation_length: 1000 # n-model-vanilla
   evaluation_seeds: null # Consecutive distinct seeds starting at env.test_seed.
   initial_queues: null # Optional list of queue vectors, one per trajectory.
