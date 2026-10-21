@@ -1,4 +1,4 @@
-"""Evaluate ZO actors until the first positive-time empty state, capped at 10*test_T.
+"""Evaluate ZO actors until S returns to empty, capped at 10*test_T.
 
 Randomness is indexed by external queue arrival and by server's newly started
 job (first service assignment). Service draws are unit-rate WORK, as in QGym:
@@ -152,27 +152,35 @@ def _init_worker(policy_bytes):
     _policy.set_training_mode(False)
 
 
-def _trajectory(env_bytes, cap, milestones=None):
+def _trajectory(env_bytes, cap, milestones=None, empty_returns=1):
+    if type(empty_returns) is not int or empty_returns < 1:
+        raise ValueError('empty_returns must be a positive integer')
     env = cloudpickle.loads(env_bytes)
     torch.manual_seed(env.seed)
     sim = RenewalEnvironment(env)
     cost, integral = 0., np.zeros(sim.q)
     snapshots = {}
+    return_count = 0
     with torch.no_grad():
         for step in range(1, cap + 1):
+            was_nonempty = any(sim.jobs)
             action, _ = _policy.predict(sim.queues().reshape(1, -1))
             increment, queue_increment = sim.step(action)
             cost += increment
             integral += queue_increment
+            # Count transitions back to empty; the initial empty state does not count.
+            # Continue the same trajectory and random streams between returns.
+            if was_nonempty and not any(sim.jobs):
+                return_count += 1
             if milestones and step in milestones:
-                snapshots[step] = (cost, integral.copy(), sim.time, step)
-            if not any(sim.jobs):
+                snapshots[step] = (cost, integral.copy(), sim.time, step, return_count)
+            if return_count >= empty_returns:
                 break
-    result = (cost, integral.copy(), sim.time, sim.steps)
-    # Each milestone means min(first return, milestone cap); stopped paths freeze.
+    result = (cost, integral.copy(), sim.time, sim.steps, return_count)
+    # Each milestone means min(S-th return, milestone cap); stopped paths freeze.
     for milestone in milestones or ():
         snapshots.setdefault(milestone, result)
-    return result, snapshots, not any(sim.jobs)
+    return result, snapshots, return_count >= empty_returns
 
 
 def _std(values):
@@ -199,13 +207,13 @@ def summarize(results):
     return metrics
 
 
-def evaluate(policy, envs, cap, milestones):
+def evaluate(policy, envs, cap, milestones, empty_returns=1):
     workers = min(48, os.cpu_count() or 1, len(envs))
     with ProcessPoolExecutor(max_workers=workers,
                              mp_context=multiprocessing.get_context('spawn'),
                              initializer=_init_worker,
                              initargs=(cloudpickle.dumps(policy),)) as executor:
-        futures = [executor.submit(_trajectory, cloudpickle.dumps(env), cap, milestones)
+        futures = [executor.submit(_trajectory, cloudpickle.dumps(env), cap, milestones, empty_returns)
                    for env in envs]
         paths = [future.result() for future in futures]
     metrics = summarize([path[0] for path in paths])
@@ -222,10 +230,14 @@ def main():
     parser.add_argument('--indices', type=int, nargs='+', default=list(range(0, 101, 10)))
     parser.add_argument('--include-final', action='store_true', help='Also evaluate final_policy.pt using original_000000.pt metadata')
     parser.add_argument('--output', type=Path)
+    parser.add_argument('--empty-returns', '--S', '-S', type=int, default=1, metavar='S',
+                        help='Stop after S returns to all-empty queues (positive integer; default: 1)')
     parser.add_argument('--ranking-check', action='store_true',
                         help="Cap at 10*test_T; report stopped trajectories at each test_T milestone")
     parser.add_argument('--check-only', action='store_true', help='Validate files and seed separation without rollouts')
     args = parser.parse_args()
+    if args.empty_returns < 1:
+        parser.error('--empty-returns / --S must be a positive integer')
     seeds = list(range(args.test_seed, args.test_seed + 400))
     if not 0 <= seeds[0] <= seeds[-1] < 2**32:
         parser.error('Test seeds must be uint32 values')
@@ -247,7 +259,7 @@ def main():
         jobs.append(path)
         eval_t, milestones = evaluation_schedule(env_config, args.ranking_check)
         print(f'{path.name}: {env_config["name"]}; base test_T={env_config["test_T"]}; '
-              f'{eval_t} events; milestones={milestones}', flush=True)
+              f'cap={eval_t} events; target empty returns={args.empty_returns}; milestones={milestones}', flush=True)
         del checkpoint, env_config
         gc.collect()
     print(f'Validated {len(jobs)} policies; {len(seeds)} environments; seeds {seeds[0]}–{seeds[-1]}', flush=True)
@@ -267,11 +279,13 @@ def main():
         policy.load_state_dict(state, strict=True)
         envs = [load_rl_p_env(copy.deepcopy(env_config), config['env']['env_temp'], 1, seed, 'WC', torch.device('cpu')) for seed in seeds]
         print(f'Evaluating {path.name}', flush=True)
-        metrics, milestone_metrics, lengths, returned = evaluate(policy, envs, eval_t, milestones)
+        metrics, milestone_metrics, lengths, returned = evaluate(
+            policy, envs, eval_t, milestones, args.empty_returns)
         print(f'{path.name}: {metrics}', flush=True)
         records.append(dict(checkpoint=path.name, metrics=metrics,
                             environment=env_config['name'], base_test_T=env_config['test_T'],
                             events_per_environment=eval_t,
+                            target_empty_returns=args.empty_returns,
                             excluded_training_seeds=used,
                             trajectory_steps=lengths, returned_empty=returned,
                             returned_empty_count=sum(returned),
@@ -285,9 +299,11 @@ def main():
         output.write_text(json.dumps(dict(environment=next(iter(environments)) if len(environments) == 1 else None,
                                          events_per_environment=next(iter(horizons)) if len(horizons) == 1 else None,
                                          ranking_check=args.ranking_check,
-                                         stopping_rule='first_positive_time_empty_or_event_cap',
+                                         stopping_rule='S_returns_to_empty_or_event_cap',
+                                         target_empty_returns=args.empty_returns,
+                                         returned_empty_definition='reached_target_empty_returns',
                                          service_coupling='per_server_first_service_unit_rate_work',
-                                         milestone_rule='min(first_return, milestone_cap)',
+                                         milestone_rule='min(Sth_return, milestone_cap)',
                                          environment_seeds=seeds, action_seeds=seeds,
                                          results=records), indent=2) + '\n')
         print(f'Saved {output}', flush=True)

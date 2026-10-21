@@ -84,6 +84,24 @@ class RenewalTests(unittest.TestCase):
         np.testing.assert_array_equal(sim.next_arrival, [10., 20.])
         np.testing.assert_array_equal(sim.queues(), [0., 1.])
 
+    def test_multiple_returns_and_cap_at_an_earlier_empty_state(self):
+        env = environment(
+            lambda env, time: torch.tensor([[10., float('inf')]]),
+            lambda env, time: torch.ones(1, 2))
+        renewal._policy = Policy()
+        result, snapshots, reached = renewal._trajectory(
+            cloudpickle.dumps(env), 20, [2, 4, 6, 20], empty_returns=3)
+        self.assertTrue(reached)
+        self.assertEqual(result[2:], (31., 6, 3))
+        self.assertEqual(result[0], 3.)
+        self.assertEqual(snapshots[2][4], 1)
+        self.assertEqual(snapshots[4][4], 2)
+        self.assertEqual(snapshots[20][3:], (6, 3))
+        capped, _, reached = renewal._trajectory(
+            cloudpickle.dumps(env), 4, empty_returns=3)
+        self.assertFalse(reached)
+        self.assertEqual(capped[2:], (21., 4, 2))
+
     def test_metrics_length_sample_std(self):
         metrics = renewal.summarize([(2., np.array([2., 4.]), 2., 2),
                                      (12., np.array([12., 16.]), 4., 6)])
@@ -95,8 +113,8 @@ class RenewalTests(unittest.TestCase):
         env = environment(
             lambda env, time: torch.tensor([[10., float('inf')]]),
             lambda env, time: torch.ones(1, 2))
-        metrics, _, lengths, returned = renewal.evaluate(Policy(), [env], 10, None)
-        self.assertEqual(lengths, [2])
+        metrics, _, lengths, returned = renewal.evaluate(Policy(), [env], 10, None, empty_returns=3)
+        self.assertEqual(lengths, [6])
         self.assertEqual(returned, [True])
         self.assertEqual(metrics['simulation_steps_std'], 0.)
 
