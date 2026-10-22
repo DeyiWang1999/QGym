@@ -211,7 +211,6 @@ def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_see
     env.obs = Obs(env.env_state.queues, env.env_state.time)
     install_streams(env, seed)
     integral = elapsed = 0.0
-    arrivals = 0
     policy.eval()
     action_generator = torch.Generator().manual_seed(seed)
     # Independent reservoir slots give uniform event-state draws WITH replacement,
@@ -220,7 +219,7 @@ def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_see
     samples = np.empty((sample_count or 0, policy.q), dtype=np.float32)
     seen = 0
     with torch.no_grad():
-        while arrivals < config['training']['evaluation_length']:
+        for step in range(config['training']['evaluation_length']):
             queues = env.env_state.queues.clone()
             if sample_count:
                 seen += 1
@@ -232,13 +231,10 @@ def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_see
             if not math.isfinite(dt) or dt < 0:
                 raise RuntimeError(
                     f'Invalid event duration: dt={dt!r}, seed={seed}, '
-                    f'arrivals={arrivals}, event={env.st_argmin.index}, '
+                    f'step={step + 1}, event={env.st_argmin.index}, '
                     f'time={env.env_state.time.tolist()}')
             integral += float(info['cost'])
             elapsed += dt
-            event = env.st_argmin.index
-            arrivals += int(event < env.q and
-                            bool((env.queue_event_options[event] > 0).any()))
     if elapsed <= 0:
         raise RuntimeError('Evaluation must have positive elapsed time')
     result = integral / elapsed, copy.deepcopy(env.env_state) if return_state else None

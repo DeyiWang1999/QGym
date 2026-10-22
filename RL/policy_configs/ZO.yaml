@@ -29,12 +29,12 @@ training:
   perturbation_seed: 100
   partition_count: 2 # Floor-sized partitions; all remaining parameters go in the last.
   evaluation_trajectories: 10
-  # evaluation_length: 30000 # External arrivals, not total simulator events. # reentrant-9
+  # evaluation_length: 30000 # Total simulator events (episode steps). # reentrant-9
   # evaluation_length: 5000 # hospital
   # evaluation_length: 27000 # reentrant-5-hyper
   # evaluation_length: 1000 # criss-cross_bh
   # evaluation_length: 1000 # n-model
-  evaluation_length: 4500 # n-model-vanilla
+  evaluation_length: 4500 # Total simulator events (episode steps); n-model-vanilla
   # evaluation_length: 10000 # criss-cross_bh_vanilla
   # evaluation_length: 2200 # criss-cross_bh_split
   # evaluation_length: 1000 # n-model-vanilla

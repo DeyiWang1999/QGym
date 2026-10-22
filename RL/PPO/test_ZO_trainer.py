@@ -459,7 +459,7 @@ class ZOTests(unittest.TestCase):
             self.assertGreaterEqual(score, 0)
             self.assertTrue(torch.isfinite(state.queues).all())
 
-    def test_dummy_arrival_is_not_counted(self):
+    def test_dummy_arrival_counts_as_episode_step(self):
         self.env['queue_event_options'] = [[1, 0], [0, 0], [-1, 0], [0, -1]]
         self.config['training']['evaluation_length'] = 1
         env = make_environment(self.env, self.config, 42)
@@ -467,11 +467,20 @@ class ZOTests(unittest.TestCase):
         initial = env.env_state._replace(arrival_times=torch.tensor([[1., 0.25]]))
         policy = ZOPolicy(env.network[0], scale=1)
         score, state = evaluate_trajectory((self.env, self.config, policy, initial, 42))
-        # The dummy event at t=.25 must not end the one-arrival evaluation.
-        self.assertEqual(float(state.time), 1.0)
-        torch.testing.assert_close(state.queues, torch.tensor([[1., 0.]]))
+        # Every simulator event counts, including a disabled arrival clock.
+        self.assertEqual(float(state.time), 0.25)
+        torch.testing.assert_close(state.queues, torch.tensor([[0., 0.]]))
         self.assertTrue(torch.isinf(state.arrival_times[0, 1]))
         self.assertEqual(score, 0.0)
+
+    def test_evaluation_length_counts_all_steps(self):
+        env = make_environment(self.env, self.config, 42)
+        env.reset(init_queues=torch.zeros(1, 2))
+        initial = env.env_state._replace(arrival_times=torch.tensor([[1., 10.]]))
+        policy = ZOPolicy(env.network[0], scale=1)
+        with patch('RL.PPO.ZO_trainer.paired_step', wraps=paired_step) as step:
+            evaluate_trajectory((self.env, self.config, policy, initial, 42))
+        self.assertEqual(step.call_count, self.config['training']['evaluation_length'])
 
     def test_nearly_simultaneous_arrivals_do_not_make_negative_clock(self):
         env = make_environment(self.env, self.config, 42)
