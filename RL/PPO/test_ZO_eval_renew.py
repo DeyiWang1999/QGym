@@ -92,15 +92,31 @@ class RenewalTests(unittest.TestCase):
         result, snapshots, reached = renewal._trajectory(
             cloudpickle.dumps(env), 20, [2, 4, 6, 20], empty_returns=3)
         self.assertTrue(reached)
-        self.assertEqual(result[2:], (31., 6, 3))
+        self.assertEqual(result[2:5], (31., 6, 3))
+        np.testing.assert_allclose(result[5], [1 / 11, 1 / 10, 1 / 10])
         self.assertEqual(result[0], 3.)
         self.assertEqual(snapshots[2][4], 1)
         self.assertEqual(snapshots[4][4], 2)
-        self.assertEqual(snapshots[20][3:], (6, 3))
+        self.assertEqual(snapshots[20][3:5], (6, 3))
+        self.assertEqual(len(snapshots[2][5]), 1)
         capped, _, reached = renewal._trajectory(
             cloudpickle.dumps(env), 4, empty_returns=3)
         self.assertFalse(reached)
-        self.assertEqual(capped[2:], (21., 4, 2))
+        self.assertEqual(capped[2:5], (21., 4, 2))
+        partial, _, _ = renewal._trajectory(cloudpickle.dumps(env), 5, empty_returns=3)
+        self.assertEqual(partial[5], capped[5])  # Unfinished third cycle excluded.
+
+    def test_cycle_statistics_pool_cycles_equally(self):
+        results = [(2., np.array([2., 4.]), 2., 2, 1, (1.,)),
+                   (12., np.array([12., 16.]), 4., 6, 2, (3., 8.))]
+        metrics = renewal.summarize(results)
+        self.assertEqual(metrics['completed_cycle_count'], 3)
+        self.assertEqual(metrics['cycle_holding_cost_mean'], 4.)
+        self.assertAlmostEqual(metrics['cycle_holding_cost_std'], np.std([1., 3., 8.], ddof=1))
+        empty = renewal.summarize([(0., np.zeros(2), 1., 1, 0, ())])
+        self.assertEqual(empty['completed_cycle_count'], 0)
+        self.assertIsNone(empty['cycle_holding_cost_mean'])
+        self.assertIsNone(empty['cycle_holding_cost_std'])
 
     def test_metrics_length_sample_std(self):
         metrics = renewal.summarize([(2., np.array([2., 4.]), 2., 2),
@@ -117,6 +133,9 @@ class RenewalTests(unittest.TestCase):
         self.assertEqual(lengths, [6])
         self.assertEqual(returned, [True])
         self.assertEqual(metrics['simulation_steps_std'], 0.)
+        self.assertEqual(metrics['completed_cycle_count'], 3)
+        self.assertAlmostEqual(metrics['cycle_holding_cost_mean'], np.mean([1 / 11, .1, .1]))
+        self.assertAlmostEqual(metrics['cycle_holding_cost_std'], np.std([1 / 11, .1, .1], ddof=1))
 
 
 if __name__ == '__main__':

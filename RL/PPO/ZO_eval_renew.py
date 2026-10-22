@@ -8,6 +8,9 @@ including when moved to another server; resuming them consumes no new draw.
 External arrival calendars use absolute float64 times and never change on routing.
 Metrics retain ZO_eval's mean/std of per-trajectory time averages. Event lengths
 are reported separately from elapsed simulated time. Capped paths are identified.
+Cycle holding-cost statistics pool C/T from completed empty-to-empty cycles,
+including idle time after each preceding empty state. Unfinished cycles are
+excluded from these additional statistics, but retained in trajectory metrics.
 """
 import argparse
 import copy
@@ -163,22 +166,34 @@ def _trajectory(env_bytes, cap, milestones=None, empty_returns=1):
     cost, integral = 0., np.zeros(sim.q)
     snapshots = {}
     return_count = 0
+    cycle_cost = 0.
+    cycle_start_time = sim.time
+    cycle_performances = []
     with torch.no_grad():
         for step in range(1, cap + 1):
             was_nonempty = any(sim.jobs)
             action, _ = _policy.predict(sim.queues().reshape(1, -1))
             increment, queue_increment = sim.step(action)
             cost += increment
+            cycle_cost += increment
             integral += queue_increment
             # Count transitions back to empty; the initial empty state does not count.
             # Continue the same trajectory and random streams between returns.
             if was_nonempty and not any(sim.jobs):
                 return_count += 1
+                duration = sim.time - cycle_start_time
+                if duration <= 0:
+                    raise RuntimeError('Completed cycle has nonpositive duration')
+                cycle_performances.append(cycle_cost / duration)
+                cycle_cost = 0.
+                cycle_start_time = sim.time
             if milestones and step in milestones:
-                snapshots[step] = (cost, integral.copy(), sim.time, step, return_count)
+                snapshots[step] = (cost, integral.copy(), sim.time, step, return_count,
+                                   tuple(cycle_performances))
             if return_count >= empty_returns:
                 break
-    result = (cost, integral.copy(), sim.time, sim.steps, return_count)
+    result = (cost, integral.copy(), sim.time, sim.steps, return_count,
+              tuple(cycle_performances))
     # Each milestone means min(S-th return, milestone cap); stopped paths freeze.
     for milestone in milestones or ():
         snapshots.setdefault(milestone, result)
@@ -206,6 +221,15 @@ def summarize(results):
                    simulation_steps_mean=float(steps.mean()), simulation_steps_std=_std(steps))
     if not all(np.isfinite(value) for value in metrics.values()):
         raise RuntimeError('Nonfinite evaluation metrics')
+    # Pool individual cycles equally, rather than averaging trajectory averages.
+    cycles = np.array([value for result in results for value in
+                       (result[5] if len(result) > 5 else ())], dtype=float)
+    if not np.isfinite(cycles).all():
+        raise RuntimeError('Nonfinite cycle holding-cost metrics')
+    metrics.update(
+        cycle_holding_cost_mean=float(cycles.mean()) if cycles.size else None,
+        cycle_holding_cost_std=_std(cycles) if cycles.size else None,
+        completed_cycle_count=int(cycles.size))
     return metrics
 
 
