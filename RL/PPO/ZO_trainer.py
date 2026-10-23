@@ -317,7 +317,7 @@ def parameter_partitions(policy, mode, count):
             raise ValueError(f'partition_count must be an integer between 1 and {total}')
         sizes = [total // count] * count
         sizes[-1] += total % count
-    elif mode != 'split_layer':
+    elif mode not in ('split_layer', 'split_vanilla'):
         raise ValueError(f'Unknown training mode: {mode}')
     offset, partitions = 0, []
     for size in sizes:
@@ -389,8 +389,9 @@ class ZerothOrderTrainer:
             env.seed = seed
             env.reset(init_queues=queues)
             self.states.append(copy.deepcopy(env.env_state))
+        candidates = 1 if t['mode'] == 'split_vanilla' else len(self.partitions)
         self.workers = min(48, t['max_cpus'], os.cpu_count() or 1,
-                           len(self.seeds) * (len(self.partitions) + 1))
+                           len(self.seeds) * (candidates + 1))
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=False)
 
@@ -439,7 +440,9 @@ class ZerothOrderTrainer:
             previous_scale = maximum if maximum != 0 else previous_scale
             perturbation_scales.append(previous_scale)
         active_partitions = [i for i, scale in enumerate(perturbation_scales) if scale != 0]
-        workers = min(self.workers, len(self.seeds) * (len(active_partitions) + 1))
+        split_vanilla = self.training['mode'] == 'split_vanilla'
+        candidate_count = int(bool(active_partitions)) if split_vanilla else len(active_partitions)
+        workers = min(self.workers, len(self.seeds) * (candidate_count + 1))
         pool = ProcessPoolExecutor(workers, mp_context=mp.get_context('spawn')) if workers > 1 else None
         try:
             for iteration in range(self.training['total_iterations']):
@@ -453,16 +456,25 @@ class ZerothOrderTrainer:
                            self.output_dir / f'original_{iteration:06d}.pt')
                 policies, directions = [copy.deepcopy(self.policy)], []
                 distances = [ratio * scale for scale in perturbation_scales]
+                candidate = base.clone()
                 for index in active_partitions:
                     part = self.partitions[index]
                     distance = distances[index]
                     direction = torch.randint(0, 2, (part.stop - part.start,), generator=self.generator).float() * 2 - 1
-                    candidate = base.clone()
+                    if not split_vanilla:
+                        candidate = base.clone()
                     candidate[part] += distance * direction
+                    directions.append(direction)
+                    if split_vanilla:
+                        continue
                     policy = copy.deepcopy(self.policy)
                     vector_to_parameters(candidate, policy.parameters())
                     policies.append(policy)
-                    directions.append(direction)
+                if split_vanilla and active_partitions:
+                    # Combine tensor-scaled perturbations into one comparison.
+                    policy = copy.deepcopy(self.policy)
+                    vector_to_parameters(candidate, policy.parameters())
+                    policies.append(policy)
                 packed_states = [pack_state(state) for state in self.states]
                 jobs = [(self.env_config, self.config, policy, state, seed, index == 0)
                         for index, policy in enumerate(policies)
@@ -484,7 +496,8 @@ class ZerothOrderTrainer:
                 self.states = [unpack_state(result[1]) for result in results[:n]]
                 accepted = [score < scores[0] for score in scores[1:]]
                 updated = base.clone()
-                for index, direction, accept in zip(active_partitions, directions, accepted):
+                partition_acceptance = accepted * len(active_partitions) if split_vanilla else accepted
+                for index, direction, accept in zip(active_partitions, directions, partition_acceptance):
                     if accept:
                         updated[self.partitions[index]] += self.training['update_ratio'] * distances[index] * direction
                 vector_to_parameters(updated, self.policy.parameters())
@@ -493,7 +506,8 @@ class ZerothOrderTrainer:
                               active_partitions=active_partitions, scores=scores, accepted=accepted)
                 if self.diagnostics_enabled:
                     queues = torch.from_numpy(np.concatenate([r[2] for r in results[:n]]))
-                    record['policy_diagnostics'] = policy_diagnostics(policies, queues, active_partitions)
+                    comparisons = [active_partitions] if split_vanilla and active_partitions else active_partitions
+                    record['policy_diagnostics'] = policy_diagnostics(policies, queues, comparisons)
                 with (self.output_dir / 'history.jsonl').open('a') as stream:
                     stream.write(json.dumps(record) + '\n')
                 log_progress(f'{label} finished: {record}')

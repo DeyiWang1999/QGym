@@ -320,8 +320,45 @@ class ZOTests(unittest.TestCase):
             torch.testing.assert_close((after[first] - last_base[first]).abs(),
                                        torch.full_like(after[first], history[-1]['perturbation_distances'][0] * 0.5))
 
+    def test_split_vanilla_combines_perturbations_and_accepts_whole_update(self):
+        for score in (9., 10., 11.):
+            with self.subTest(score=score), tempfile.TemporaryDirectory() as temp:
+                self.config['training'].update(mode='split_vanilla', total_iterations=1,
+                                               update_ratio=0.5,
+                                               policy_diagnostics={'enabled': True, 'num_samples': 4})
+                trainer = ZerothOrderTrainer(self.env, self.config, Path(temp)/'run')
+                self.assertEqual(trainer.partitions, parameter_partitions(trainer.policy, 'split_layer', 1))
+                before = parameters_to_vector(trainer.policy.parameters()).detach().clone()
+                candidates = []
+
+                def evaluate(job):
+                    if not job[5]:
+                        candidates.append(parameters_to_vector(job[2].parameters()).detach().clone())
+                        return score, None
+                    return 10., job[3], torch.ones(job[6], trainer.policy.q).numpy()
+
+                with patch.object(trainer, 'pretrain'), patch.object(trainer, 'pre_train_eval'), \
+                        patch('RL.PPO.ZO_trainer.evaluate_packed_trajectory', side_effect=evaluate):
+                    trainer.train()
+                self.assertEqual(len(candidates), len(trainer.seeds))
+                delta = candidates[0] - before
+                scale = 0.
+                for part in trainer.partitions:
+                    scale = float(before[part].abs().max()) or scale
+                    distance = self.config['training']['initial_perturbation_ratio'] * scale
+                    torch.testing.assert_close(delta[part].abs(), torch.full_like(delta[part], distance))
+                after = parameters_to_vector(trainer.policy.parameters()).detach()
+                expected = before + 0.5 * delta if score < 10. else before
+                torch.testing.assert_close(after, expected)
+                record = json.loads((trainer.output_dir/'history.jsonl').read_text())
+                self.assertEqual(record['scores'], [10., score])
+                self.assertEqual(record['accepted'], [score < 10.])
+                comparisons = record['policy_diagnostics']['comparisons']
+                self.assertEqual(len(comparisons), 1)
+                self.assertEqual(comparisons[0]['partition'], record['active_partitions'])
+
     def test_leading_zero_partitions_skip_perturbation_and_evaluation(self):
-        for mode in ('vanilla', 'partitioned', 'split_layer'):
+        for mode in ('vanilla', 'partitioned', 'split_layer', 'split_vanilla'):
             for all_zero in (False, True):
                 with self.subTest(mode=mode, all_zero=all_zero), tempfile.TemporaryDirectory() as temp:
                     self.config['training'].update(mode=mode, partition_count=3)
@@ -350,7 +387,8 @@ class ZOTests(unittest.TestCase):
                         trainer.train()
                     iterations = self.config['training']['total_iterations']
                     self.assertEqual(perturb.call_count, iterations * len(active))
-                    self.assertEqual(len(calls), iterations * len(trainer.seeds) * (len(active) + 1))
+                    candidates = int(bool(active)) if mode == 'split_vanilla' else len(active)
+                    self.assertEqual(len(calls), iterations * len(trainer.seeds) * (candidates + 1))
                     final = parameters_to_vector(trainer.policy.parameters()).detach()
                     for i, part in enumerate(trainer.partitions):
                         if i not in active:
@@ -360,8 +398,8 @@ class ZOTests(unittest.TestCase):
                     history = [json.loads(line) for line in (Path(temp)/'run/history.jsonl').read_text().splitlines()]
                     for record in history:
                         self.assertEqual(record['active_partitions'], active)
-                        self.assertEqual(len(record['scores']), len(active) + 1)
-                        self.assertEqual(record['accepted'], [True] * len(active))
+                        self.assertEqual(len(record['scores']), candidates + 1)
+                        self.assertEqual(record['accepted'], [True] * candidates)
 
     def test_zero_parts_inherit_initial_distance_and_decay(self):
         for mode in ('partitioned', 'split_layer'):
@@ -408,7 +446,7 @@ class ZOTests(unittest.TestCase):
                                          [2. * perturbation_ratio(trainer.training, iteration)] * len(trainer.partitions))
 
     def test_all_modes_and_spawn(self):
-        for mode in ('vanilla', 'partitioned', 'split_layer'):
+        for mode in ('vanilla', 'partitioned', 'split_layer', 'split_vanilla'):
             with self.subTest(mode=mode), tempfile.TemporaryDirectory() as temp:
                 self.config['training'].update(mode=mode, partition_count=3,
                                                max_cpus=2 if mode == 'vanilla' else 1)
