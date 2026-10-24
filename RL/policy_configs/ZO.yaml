@@ -20,7 +20,7 @@ behavior_cloning:
 pretrain_evaluation:
   enabled: false # Set false to skip evaluation/cache loading and use raw queue inputs.
 training:
-  mode: vanilla # vanilla, partitioned, split_layer
+  mode: split_vanilla # vanilla, partitioned, split_layer
   total_iterations: 100
   # total_iterations: 100 # n-model
   initial_perturbation_ratio: 0.5
@@ -30,10 +30,10 @@ training:
   partition_count: 2 # Floor-sized partitions; all remaining parameters go in the last.
   evaluation_trajectories: 10
   # evaluation_length: 30000 # reentrant-9-split
-  # evaluation_length: 135000 # reentrant-9-vanilla
+  evaluation_length: 135000 # reentrant-9-vanilla
   # evaluation_length: 5000 # hospital
   # evaluation_length: 27000 # reentrant-5-hyper-split
-  evaluation_length: 121500 # reentrant-5-hyper-vanilla
+  # evaluation_length: 121500 # reentrant-5-hyper-vanilla
   # evaluation_length: 1000 # criss-cross_bh
   # evaluation_length: 1000 # n-model-split
   # evaluation_length: 4500 # n-model-vanilla
