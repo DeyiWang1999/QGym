@@ -96,7 +96,7 @@ def summarize(trajectories, checkpoints):
     return summary
 
 
-def plot_results(report, figure_path):
+def plot_results(report, figure_path, x_axis='mean_events'):
     import matplotlib
     matplotlib.use('Agg')
     import matplotlib.pyplot as plt
@@ -105,12 +105,13 @@ def plot_results(report, figure_path):
             ('event_checkpoints', 'Fixed event count', 'o'),
             ('return_checkpoints', 'Returns to empty', 's')):
         series = report['summary'][key]
-        ax.errorbar([r['mean_events'] for r in series],
+        ax.errorbar([r[x_axis] for r in series],
                     [r['mean_average_cost'] for r in series],
                     yerr=[r['ci95_half_width'] for r in series],
                     fmt=marker + '-', markersize=3, linewidth=1.2,
                     elinewidth=.7, capsize=2, label=label)
-    ax.set_xlabel('Number of events (mean across trajectories for empty returns)')
+    ax.set_xlabel('s (event horizon = s * test_T; empty returns = s)' if x_axis == 's'
+                  else 'Number of events (mean across trajectories for empty returns)')
     ax.set_ylabel('Mean cumulative holding cost / cumulative time')
     ax.set_title(f"{Path(report['checkpoint']).parent.name}/{Path(report['checkpoint']).name}\n"
                  f"{len(report['environment_seeds'])} trajectories; pointwise 95% CIs")
@@ -194,7 +195,9 @@ def main():
     output.write_text(json.dumps(report, indent=2, allow_nan=False) + '\n', encoding='utf-8')
     figure_path = output.with_suffix('.png')
     plot_results(report, figure_path)
-    print(f'Saved {output}\nSaved {figure_path}', flush=True)
+    s_figure_path = output.with_name(output.stem + '_by_s.png')
+    plot_results(report, s_figure_path, x_axis='s')
+    print(f'Saved {output}\nSaved {figure_path}\nSaved {s_figure_path}', flush=True)
 
 
 if __name__ == '__main__':
