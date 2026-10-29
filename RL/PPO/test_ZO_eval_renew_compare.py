@@ -20,7 +20,7 @@ class ComparisonTests(unittest.TestCase):
             lambda env, time: torch.ones(1, 2))
 
     def test_both_targets_in_either_order(self):
-        for base, final_steps, final_returns in [(1, 60, 30), (20, 60, 30), (40, 120, 60)]:
+        for base, final_steps, final_returns in [(1, 300, 150), (100, 300, 150), (200, 600, 300)]:
             with self.subTest(base=base):
                 sim = comparison.RenewalEnvironment(self.make_env())
                 result = comparison.collect_trajectory(sim, Policy(), base, 3)
@@ -28,12 +28,12 @@ class ComparisonTests(unittest.TestCase):
                 self.assertEqual(result['final_returns'], final_returns)
                 self.assertEqual([r['events'] for r in result['event_checkpoints']],
                                  [base, 2 * base, 3 * base])
-                self.assertEqual([r['events'] for r in result['return_checkpoints']], [20, 40, 60])
+                self.assertEqual([r['events'] for r in result['return_checkpoints']], [100, 200, 300])
                 self.assertEqual([r['s'] for r in result['return_checkpoints']], [1, 2, 3])
-                self.assertEqual([r['returns'] for r in result['return_checkpoints']], [10, 20, 30])
+                self.assertEqual([r['returns'] for r in result['return_checkpoints']], [50, 100, 150])
                 np.testing.assert_allclose(
                     [r['average_cost'] for r in result['return_checkpoints']],
-                    [10 / 101, 20 / 201, 30 / 301])
+                    [50 / 501, 100 / 1001, 150 / 1501])
                 self.assertEqual(len(result['return_checkpoints']), 3)
 
     def test_summary_ci_and_plot(self):
@@ -45,7 +45,7 @@ class ComparisonTests(unittest.TestCase):
             second[key][0]['average_cost'] = 6.
         second['return_checkpoints'][0]['events'] = 8
         summary = comparison.summarize([result, second], 1)
-        self.assertEqual(summary['return_checkpoints'][0]['mean_events'], 14.)
+        self.assertEqual(summary['return_checkpoints'][0]['mean_events'], 54.)
         self.assertEqual(summary['event_checkpoints'][0]['mean_events'], 2.)
         self.assertEqual(summary['return_checkpoints'][0]['mean_average_cost'], 4.)
         self.assertAlmostEqual(summary['return_checkpoints'][0]['ci95_half_width'], 3.92)
@@ -65,7 +65,7 @@ class ComparisonTests(unittest.TestCase):
                                            cloudpickle.dumps(self.make_env()), 1, 3)) as pool:
             first, second = list(pool.map(comparison._run_seed, [142, 142]))
         self.assertEqual(first, second)
-        self.assertEqual(first['final_events'], 60)
+        self.assertEqual(first['final_events'], 300)
         self.assertEqual(first['seed'], 142)
 
 

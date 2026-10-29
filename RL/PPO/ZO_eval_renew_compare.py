@@ -1,7 +1,7 @@
 """Compare fixed-event and renewal checkpoints on the same trajectories.
 
 Defaults: criss_cross_bh_split_1/original_000000.pt, 400 seeds, s=1,...,100.
-Stop after BOTH 100*test_T events and 1000 returns to empty, with no upper cap.
+Stop after BOTH 100*test_T events and 5000 returns to empty, with no upper cap.
 All estimates use cumulative holding cost / cumulative simulated time.
 """
 import argparse
@@ -23,7 +23,7 @@ from RL.PPO.ZO_eval import EvaluationPolicy, evaluation_schedule, load_selected_
 from RL.PPO.ZO_eval_renew import RenewalEnvironment
 from RL.utils.rl_env import load_rl_p_env
 
-RETURNS_PER_CHECKPOINT = 10
+RETURNS_PER_CHECKPOINT = 50
 
 
 def collect_trajectory(sim, policy, base, checkpoints=100):
@@ -113,7 +113,7 @@ def plot_results(report, figure_path, x_axis='mean_events'):
                     yerr=[r['ci95_half_width'] for r in series],
                     fmt=marker + '-', markersize=3, linewidth=1.2,
                     elinewidth=.7, capsize=2, label=label)
-    ax.set_xlabel('s (event horizon = s * test_T; empty returns = 10*s)' if x_axis == 's'
+    ax.set_xlabel('s (event horizon = s * test_T; empty returns = 50*s)' if x_axis == 's'
                   else 'Number of events (mean across trajectories for empty returns)')
     ax.set_ylabel('Mean cumulative holding cost / cumulative time')
     ax.set_title(f"{Path(report['checkpoint']).parent.name}/{Path(report['checkpoint']).name}\n"
