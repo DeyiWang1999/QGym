@@ -2,6 +2,8 @@
 
 This repository is built on the original [QGym repository](https://github.com/namkoong-lab/QGym), which provides simulation and benchmarking tools for queueing network controllers. This README focuses on zeroth-order (ZO) policy training and evaluation, with instructions for the PPO baseline.
 
+The `RL/PPO/` directory includes several result directories corresponding to the experiments reported in [the paper (arXiv:2611.01186v1)](https://arxiv.org/abs/2611.01186v1). These cover `criss_cross_bh`, `n_model`, `reentrant_5_hyper`, and `reentrant_9`, with directories ending in `_PPO`, `_split`, and `_vanilla` for the corresponding methods.
+
 ## Python environment
 
 In your Python environment, install the dependencies with:
