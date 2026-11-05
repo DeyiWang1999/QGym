@@ -111,7 +111,7 @@ def main():
         return
     torch.set_num_threads(1)
     output = args.output or args.checkpoint_dir / (
-        'ppo_ranking_evaluation.json' if args.ranking_check else 'ppo_evaluation.json')
+        'ranking_evaluation.json' if args.ranking_check else 'evaluation.json')
     records = []
     for path in jobs:
         checkpoint = load_selected_checkpoint(path)
