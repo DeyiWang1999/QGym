@@ -1,352 +1,127 @@
-# QGym: Scalable Simulation and Benchmarking of Queuing Network Controllers
-<a target="_blank" style="display: inline-block; vertical-align: middle" href="https://colab.research.google.com/drive/1kUbamdvD_z82nIhlc_GG8SD_-nfRfgoE?usp=sharing">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a>
+# Zeroth-Order Training on QGym
 
-![Teaser Image](assets/teaser_even_larger_font.svg)
+This repository is built on the original [QGym repository](https://github.com/namkoong-lab/QGym), which provides simulation and benchmarking tools for queueing network controllers. This README focuses on zeroth-order (ZO) policy training and evaluation, with instructions for the PPO baseline.
 
+## Python environment
 
-## Table of Contents
-- [File Structure](#file-structure)
-- [Use as an OpenAI Gym Environment](#use-as-an-openai-gym-environment)
-  * [Usage](#usage)
-  * [API Reference for `DiffDiscreteEventSystem(gym.Env)`](#api-reference-for--diffdiscreteeventsystem-gymenv--)
-- [How to Run Experiments](#how-to-run-experiments)
-  * [Running an Experiment](#running-an-experiment)
-  * [Defining an Experiment](#defining-an-experiment)
-  * [Defining a Queueing Network](#defining-a-queueing-network)
-  * [Defining Arrival and Service Patterns](#defining-arrival-and-service-patterns)
-  * [Defining a Queueing Policy](#defining-a-queueing-policy)
-  * [Defining Training/Testing Hypeprarameters](#defining-training-testing-hypeprarameters)
-  * [Running a RL experiment](#running-a-rl-experiment)
-- [Benchmarking Results](#benchmarking-results)
-
-
-## Overview
-QGym is an open-source simulation framework designed to benchmark queuing policies across diverse and realistic problem instances. The framework supports a wide range of environments including parallel servers, criss-cross, tandem, and re-entrant networks. It provides a platform for comparing both model-free RL methods and classical queuing policies. See more details in our [paper](https://arxiv.org/pdf/2410.06170).
-
-## Highlights of QGym
-- **OpenAI Gym Interface**: Easy deployment of RL algorithms.
-- **Event-driven Simulation**: Precise timekeeping and fast simulation.
-- **Job-Level Tracking**: Allows modeling parallel server systems.
-- **Arbitrary Arrival Patterns**: Simulates time-varying arrival patterns.
-- **Server Pool**: Fast simulation for a large number of same-class servers.
-- **Batch Simulation**: Efficient parallel simulation of multiple trajectories.
-- **Open-sourced**: Adaptable to custom needs.
-
-<br/>
-
-# File Structure
-
-- `main`
-    - `run_experiments.py`: Runs a batch of experiments configured in `configs/experiments`. See [Running Experiments](#running-an-experiment) for details.
-    - `trainer.py`: Defines the Trainer class, which is a collection of methods for training and evaluating models.
-    - `env.py` Simulator code with OpenAI Gym interface
-- `configs`
-    - `experiments`: Each directory under `experiments` contains one or more YAML files. Each YAML file configures a single experiment. See [Experiment Configuration](#experiment-configuration) for details.
-    - `env`: Contains YAML files for specifying queueing networks.
-    - `model`: Contains YAML files for specifying queueing policies.
-    - `scripts`: Contains Python files for defining arrival and serive patterns.
-- `logs`: Contains loss and switchplot logging for experiments
-- `policies`: Contains queueing policy implementations
-- `utils`: Contains utility functions for routing and plotting.
-- `RL`: Contains the PPO and its variant baselines used in the benchmark. 
-    - `policies`: Contains various PPO policies, including 'WC' and 'Vanilla'
-    - `PPO`: Contains the implementation of PPO algorithm 
-        - `trainer.py`: PPO trainer
-        - `train.py`: Main script for launching PPO experiments.
-    - `utils`: 
-        - `rl_env.py`: Wrapper for the queueing environment to make it compatible with RL algorithms
-        - `eval.py`: Evaluation utilities for RL models
-    - `policy_configs`: Contains YAML configuration files for different RL policies
-
-
-# Use as an OpenAI Gym Environment
-
-User can write customized experiment code using only our environment as an OpenAI Gym Envrionment using `DiffDiscreteEventSystem` class in `main/env.py`. User can interact with this environment with `reset` and `step` method as other OpenAI Gym environments.
-
-Below is detailed documentation of `DiffDiscreteEventSystem` class and other helper classes in `main/env.py`.
-
-## Usage
-
-To use this simulator, create an instance of `DiffDiscreteEventSystem` with appropriate parameters, then use the `reset()` method to initialize the environment and `step(action)` to simulate the system over time.
-
-Example:
-```python
-env = DiffDiscreteEventSystem(network, mu, h, draw_service, draw_inter_arrivals)
-obs, state = env.reset()
-for _ in range(num_steps):
-    action = policy(obs)
-    obs, reward, done, truncated, info = env.step(action)
-```
-
-See details in how to define each parameter for a queue system in section [Defining a Queueing Network](#defining-a-queueing-network)
-
-
-## API Reference for `DiffDiscreteEventSystem(gym.Env)`
-
-#### Parameters:
-- `network` (torch.Tensor): The network topology.
-- `mu` (torch.Tensor): Service rates for each server.
-- `h` (float): Holding cost per unit time for jobs in queues.
-- `draw_service` (callable): Function to draw service times for jobs in the queues.
-  - **Input:**
-    - `time` (torch.Tensor): Current simulation time, shape (batch_size, 1).
-  - **Output:**
-    - `torch.Tensor`: Drawn service times, shape (batch_size, 1, num_queues).
-    Each element represents the service time for a new job in the corresponding queue.
-
-- `draw_inter_arrivals` (callable): Function to draw inter-arrival times for each queue.
-  - **Input:**
-    - `time` (torch.Tensor): Current simulation time, shape (batch_size, 1).
-  - **Output:**
-    - `torch.Tensor`: Drawn inter-arrival times, shape (batch_size, num_queues).
-    Each element represents the time until the next arrival for the corresponding queue.
-- `init_time` (float, optional): Initial simulation time. Default is 0.
-- `batch` (int, optional): Batch size for parallel simulations. Default is 1.
-- `queue_event_options` (torch.Tensor, optional): Custom queue event options.
-- `straight_through_min` (bool, optional): Use straight-through estimator for min operation. Default is False.
-- `queue_lim` (int, optional): Maximum queue length.
-- `temp` (float, optional): Temperature for Gumbel-Softmax. Default is 1.
-- `seed` (int, optional): Random seed. Default is 3003.
-- `device` (str, optional): Device to run computations on. Default is "cpu".
-- `f_hook` (bool, optional): Enable hooks for debugging. Default is False.
-- `f_verbose` (bool, optional): Enable verbose output. Default is False.
-
-#### Methods:
-
-##### `reset(init_queues=None, time=None, seed=None)`
-Reset the environment to its initial state.
-
-- **Parameters:**
-  - `init_queues` (torch.Tensor, optional): Initial queue lengths. If None, all queues start empty.
-  - `time` (torch.Tensor, optional): Initial simulation time. If None, starts at 0.
-  - `seed` (int, optional): Random seed for reproducibility.
-
-- **Returns:**
-  - `Obs`: An Obs namedtuple containing:
-    - `queues` (torch.Tensor): Initial queue lengths.
-    - `time` (torch.Tensor): Initial simulation time.
-  - `EnvState`: An EnvState namedtuple containing:
-    - `queues` (torch.Tensor): Initial queue lengths.
-    - `time` (torch.Tensor): Initial simulation time.
-    - `service_times` (list of lists): Initial service times for each job in each queue.
-    - `arrival_times` (torch.Tensor): Initial time until next arrival for each queue.
-
-##### `step(action)`
-Perform one step of the simulation given an action.
-
-- **Parameters:**
-  - `action` (torch.Tensor): The action to take, representing the allocation of servers to queues.
-
-- **Returns:**
-  - `queues` (torch.Tensor): Updated queue lengths after the step.
-  - `reward` (torch.Tensor): Negative of the cost incurred during this step.
-  - `done` (bool): Whether the episode has ended (always False in this implementation).
-  - `truncated` (bool): Whether the episode was truncated (always False in this implementation).
-  - `info` (dict): Additional information about the step, containing:
-    - `obs` (Obs): Current observation after the step.
-    - `state` (EnvState): Full environment state after the step.
-    - `cost` (torch.Tensor): Cost incurred during this step.
-    - `event_time` (torch.Tensor): Time elapsed during this step.
-    - `queues` (torch.Tensor): Current queue lengths after the step.
-
-##### `get_observation()`
-Get the current observation of the system state.
-
-- **Returns:**
-  - `torch.Tensor`: Current queue lengths.
-
-##### `print_state()`
-Print the current state of the system.
-
-- **Prints:**
-  - Total accumulated cost
-  - Total time elapsed
-  - Current queue lengths
-  - Remaining service times for jobs in each queue
-  - Time until next arrival for each queue
-
-
-# How to Run Experiments
-<a target="_blank" style="display: inline-block; vertical-align: middle" href="https://colab.research.google.com/drive/1kUbamdvD_z82nIhlc_GG8SD_-nfRfgoE?usp=sharing">
-  <img src="https://colab.research.google.com/assets/colab-badge.svg" alt="Open In Colab"/>
-</a>
-
-In addition to the Gym environment for queueing system, we provide interface for easy configuration of queuing systems, policies, training and testing procedure. Users can easily create and run training/testing experiments and view results. We provide a demo in this [Colab notebook](https://colab.research.google.com/drive/157MJ0AtqokMA8tOrOkJintQTQWMf26Je?usp=sharing). We detail each step in configuring an experiment below:
-
-## Running an Experiment
-In the `main` directory, run the `run_experiments.py` script with the `-exp_dir` argument set to the name of the subdirectory in `configs/experiments` containing the desired experiment YAML files.
-
-For example, to run all experiments in the `reentrant_5` subdirectory, run:
+In your Python environment, install the dependencies with:
 
 ```bash
-python main/run_experiments.py -exp_dir=reentrant_5
+python -m pip install torch==2.2.2 numpy==1.26.4 scipy==1.11.4 gym==0.26.2 gymnasium==0.29.1 stable-baselines3==2.3.2 shimmy==1.3.0 PyYAML==6.0.1 matplotlib==3.8.4 tqdm==4.66.4 cvxpy==1.4.3 pathos==0.3.2
 ```
 
-## Defining an Experiment
+Run the commands below from the repository root.
 
-Experiments are configured using YAML files located in the `configs/experiments` directory. Each experiment has its own subdirectory containing one or more YAML files specifying the environment, model, and script to run.
+## ZO training
 
-An example experiment YAML file:
-
-```yaml
-env: 'reentrant_5.yaml'
-model: 'ppg_linearassignment.yaml'
-script: 'fixed_arrival_rate_cmuq.py'
-experiment_name: 'reentrant_5_cmuq'
-```
-
-Further description of each field:
-- `env`: refers to the file located under `configs/env`. Use tihs file to define parameters for queuing network. See section [Defining a Queueing Network](#defining-a-queueing-network) for more details.
-- `model`:  refers to the file located under `configs/model`. Use this file to define parameters for routing policy. See section [Defining a Queueing Policy](#defining-a-queueing-policy) for more details.
-- `script`: refers to the file located under `configs/scripts`. Use this file to (1) define arrival and service patterns as functions of time and using parameters specified in `env` file; (2) Specify which policy class to use and create policy using parameters specified in `model` file; (3) train and evaluate the policy and output loss log under `logs/{experiment_name}`.
-
-## Defining a Queueing Network
-
-Parameters for a queueing network is defined in a file under the `configs/env` directory. Each YAML file contains the following keys:
-- `network`: Defines the network topology.
-- `mu`: Defines the arrival rate.
-- `lam_params`: Defines the arrival parameters.
-- `server_pool_size`: Defines the server pool size.
-- `h`: Defines holding cost for each queue.
-- `queue_event_options`: Define changes to each queue at each arrival or service event.
-- `train_T`, `test_T`: step number of each simulation trajectory.
-- `init_queues`: Initial queue lengths
-
-The figure below shows an intuitive illustration of ingredients of a queueing network and example parameters for criss-cross network.
-
-![ingredients_even_larger_font-1](assets/criss-cross-updated.svg)
-
-We also provide configuration files of all systems we benchmarked in our paper in `configs/env`. Refer to the figure below for an intuitive illustration of the queueing systems we benchmarked:
-
-![systems_even_larger_font-1](assets/systems_even_larger_font-1.svg)
-
-## Defining Arrival and Service Patterns
-
-The arrival and service patterns are defined in the `configs/scripts` directory.
-
-Define an arrival and service patterns as arbitrary function of time that returns time until next arrival or service for each queue.
-
-```
-draw_inter_arrivals(self, time)
-
-...
-
-return interarrivals
-```
-
-
-## Defining a Queueing Policy
-To define the exact logic of the policy, use file `policies/<policy>.py`. Each of policy file contains a class that implements the policy. The policy class is used in `configs/scripts/<script>.py`.
-
-Each class includes mandatory `test_forward` that takes in observations and return queue-server priority matrix. Optionally, it can include `train_forward` for training the policy.
-
-We provide the code for policies we benchmarked in our paper in `polices` directory.
-
-## Defining Training/Testing Hypeprarameters
-
-Parameters for a queueing policy is defined in a file under `configs/model` directory. Each YAML file contains the following important hyperparameters:
-- `test_batch_size`: The batch size for the test set.
-- `num_epochs`: The number of epochs to train the policy.
-- `test_policy`, `train_policy`: Assignment algorithm. Supported options are `linear_assignment`, `sinkhorn`, and `softmax`.
-
-For static policies such as c-$\mu$ and max weight, use `ppg_linearassignment.yaml`.
-
-
-## Running RL training and evaluation
-
-We provide codebase to train and evaluate several RL baselines. To run a reinforcement learning experiment, use the following command in the `RL/PPO` directory:
+### Run from the command line
 
 ```bash
-python train.py <policy-config-name> <queue-env-name>
+python RL/PPO/ZO_train.py ZO reentrant_2 --output-dir RL/PPO/reentrant_2_zo_run1
 ```
 
-Specifically, you can choose from three policy configs:
+The positional arguments select the policy configuration (`RL/policy_configs/ZO.yaml`) and environment configuration (`configs/env/reentrant_2.yaml`). Both accept names with or without `.yaml`; absolute YAML paths are also supported. If omitted, these arguments default to `ZO` and `reentrant_2`.
 
-1. `WC.yaml`: Work-conserving policy
-2. `vanilla.yaml`: Vanilla policy
-3. `discrete.yaml`: Discrete action space policy
+`--output-dir` selects the output directory, relative to the current working directory or as an absolute path. Without this option, results go to `RL/PPO/<env_config.name>/`. **The output directory must not already exist**, so choose a new directory for each run. ZO training runs on CPU.
 
-These policy config files are located in the `QGym/RL/policy_configs` directory. For the queue environment name, use the name of the YAML file (without the .yaml extension) from the `QGym/configs/env` directory that defines your desired queueing network.
+The trainer optionally initializes the actor through behavior cloning, then compares the current actor with perturbed candidates using paired simulation trajectories. A candidate improves the objective when it reduces average holding cost per unit simulated time, averaged across trajectories. Accepted directions update the actor by a fraction of the perturbation. Simulator states from the unperturbed actor continue into the next iteration.
 
-For example, to train a work-conserving policy on the reentrant line with 2 stations, you would run:
+### Configure the training process
+
+Edit [RL/policy_configs/ZO.yaml](RL/policy_configs/ZO.yaml) before launching a run. The environment YAML separately defines the network, service and arrival parameters, holding costs, initial queues, and evaluation horizon `test_T`.
+
+| Configuration | Effect |
+| --- | --- |
+| `env.device` | Must be `cpu` for ZO. |
+| `env.env_temp` | Temperature passed to the simulator. |
+| `env.model_seed` | Seeds actor initialization and behavior-cloning queue samples. |
+| `env.train_seed` | Seeds the training environment and supplies the starting seed for default comparison trajectories. |
+| `env.test_seed` | Starting seed for optional pre-training normalization evaluation. |
+| `env.randomize` | Actor action-selection setting; training comparisons and evaluation explicitly sample actions regardless of this flag. |
+| `model.scale` | Controls actor hidden-layer widths. The ZO implementation uses a work-conserving (WC) actor without a critic; keep `model.policy_name: WC`. |
+| `behavior_cloning.enabled` | Enables initialization by fitting action probabilities proportional to queue length times service rate over compatible queues. Set to `false` to start from the initialized actor. |
+| `behavior_cloning.num_samples`, `batch_size`, `epochs`, `learning_rate` | Control the amount of synthetic queue data and the Adam optimization used for behavior cloning. |
+| `pretrain_evaluation.enabled` | When `false`, uses raw queue inputs. When `true`, loads normalization statistics from `RL/PPO/pretrain_evaluation.json` if present; otherwise estimates them using 100 trajectories of `test_T` events. Ensure any shared cache is appropriate for the run. |
+| `training.mode` | Selects the perturbation scheme described below. |
+| `training.total_iterations` | Number of ZO update iterations. |
+| `training.initial_perturbation_ratio`, `ending_perturbation_ratio` | Start and end perturbation ratios, scaled by fixed parameter magnitudes measured after initialization/behavior cloning. Zero-scale parts inherit the preceding part's scale; leading zero-scale parts remain unchanged. |
+| `training.perturbation_scheduler` | `logarithmic` (geometric decay), `linear`, or `cosine` schedule between the two ratios. |
+| `training.perturbation_seed` | Seeds the random sign perturbation directions. |
+| `training.partition_count` | Number of parameter-vector partitions in `partitioned` mode; the final partition contains the remainder. |
+| `training.evaluation_trajectories` | Number of paired trajectories used to compare each candidate with the current actor. These trajectories select training updates, so they are not held-out tests. |
+| `training.evaluation_length` | Number of simulator events per comparison trajectory per iteration. |
+| `training.evaluation_seeds` | Explicit list of distinct seeds, one per trajectory. With `null`, the implementation uses consecutive seeds starting at `env.train_seed` (the YAML comment currently says `env.test_seed`). |
+| `training.initial_queues` | Optional list of initial queue vectors, one per trajectory. With `null`, uses the environment YAML's `init_queues`. |
+| `training.update_ratio` | Fraction of an accepted perturbation applied to the actor. |
+| `training.max_cpus` | Upper bound on worker processes, also limited by available CPUs, comparison jobs, and a hard cap of 48. |
+| `training.policy_diagnostics.enabled`, `num_samples` | Enable policy comparisons on sampled queue states and control the number of sampled states per iteration. Results are included in the history. |
+
+The supported modes are:
+
+- `vanilla`: perturb the entire parameter vector as one candidate with one scale.
+- `partitioned`: perturb each contiguous parameter partition separately and accept improvements independently.
+- `split_layer`: perturb each parameter tensor separately (weights and biases form separate parts), with independent comparisons and acceptance.
+- `split_vanilla`: use tensor-specific scales but combine all perturbations into one candidate and accept or reject them together.
+
+The checked-in configuration uses `split_vanilla`, 100 iterations, 10 comparison trajectories, and 135,000 events per trajectory, with behavior cloning enabled and pre-training normalization evaluation disabled. Adjust the horizon and iteration count for your environment and compute budget.
+
+### Generated outputs
+
+The output directory contains:
+
+| File | Contents |
+| --- | --- |
+| `initial_policy.pt` | Actor state dictionary after optional behavior cloning and normalization setup. |
+| `original_000000.pt`, `original_000001.pt`, ... | Checkpoint saved **before** each iteration's update, containing actor weights, policy/environment configurations, comparison seeds, and simulator states. |
+| `history.jsonl` | One JSON record per completed iteration: perturbation ratio, parameter scales and distances, active partitions, baseline/candidate scores, acceptance decisions, and optional policy diagnostics. Lower scores are better. |
+| `final_policy.pt` | Actor state dictionary after the final update. |
+| `pretrain_evaluation.json` | Normalization statistics, written only when pre-training evaluation is enabled, whether computed or loaded from the shared cache. |
+
+Progress and iteration results are also printed to the terminal. With 100 iterations, checkpoints range from `original_000000.pt` through `original_000099.pt`; the final updated actor is in `final_policy.pt`.
+
+### Evaluate saved ZO policies
+
+For the 100-iteration run above, evaluate every tenth checkpoint and the final actor with:
 
 ```bash
-python train.py WC reentrant_2
+python RL/PPO/ZO_eval.py RL/PPO/reentrant_2_zo_run1 --indices 0 10 20 30 40 50 60 70 80 90 --include-final --test-seed 142
 ```
 
-To simulate different environments, such as defining different service and arrival functions, you can go to `QGym/RL/utils/rl_env.py` and change your custom functions in `load_rl_p_env`.
+Supply explicit `--indices`: the script's default list includes index 100, which is absent from a 100-iteration run. To evaluate only the initial checkpoint and final actor:
 
+```bash
+python RL/PPO/ZO_eval.py RL/PPO/reentrant_2_zo_run1 --indices 0 --include-final --test-seed 142
+```
 
+Evaluation uses 400 environments with consecutive seeds starting at `--test-seed`, stochastic actions, and `test_T` events per environment from the saved environment configuration. It resets environments for evaluation and currently requires `num_pool: 1`. Choose test seeds disjoint from training and normalization seeds; the current script does not enforce overlap rejection.
 
-# Benchmarking Results
-We show current benchmarking results below
+Results are written to `evaluation.json` inside the checkpoint directory, including queue, simulated-time, total-queue, and holding-cost statistics. Use `--output path/to/results.json` to choose another file (its parent directory must exist).
 
-### Criss-cross
-| Network         | $c\mu$        | MW                   | MP                    | FP           | PPO                   | PPO BC        | PPO WC                |
-|-----------------|---------------|----------------------|-----------------------|--------------|-----------------------|---------------|-----------------------|
-| Criss Cross BH  | $16.1 \pm 0.0$ | $\mathbf{15.3 \pm 0.0}$ | $8.3\text{E+}3 \pm 0.0$ | $29.3 \pm 0.0$ | $8.6\text{E+}3 \pm 4.6$ | $24.0 \pm 0.2$ | $\mathbf{15.4 \pm 0.2}$ |
+Additional options:
 
+- `--check-only`: load and validate selected checkpoints without running rollouts; it does not currently enforce seed separation.
+- `--ranking-check`: evaluate for `5 * test_T` events and record cumulative queue statistics at each `test_T` milestone. The default output becomes `ranking_evaluation.json`.
+- `--include-final`: load `final_policy.pt` using configuration metadata from `original_000000.pt`; keep both files in the checkpoint directory.
 
-### Reentrant-1 [Exponential]
-| $L$ | $c\mu$         | MW                   | MP                   | FP                     | PPO                     | PPO BC               | PPO WC                  |
-|-----|----------------|----------------------|----------------------|------------------------|-------------------------|----------------------|-------------------------|
-| 2   | $19.0 \pm 0.0$ | $14.8 \pm 0.0$       | $18.9 \pm 0.0$       | $1.0\text{E+}3 \pm 0.0$ | $1.8\text{E+}3 \pm 6.6$ | $25.1 \pm 0.6$       | $\mathbf{13.6 \pm 0.4}$ |
-| 3   | $\mathbf{21.6 \pm 0.0}$ | $24.8 \pm 0.0$       | $30.9 \pm 0.0$       | $8.1\text{E+}3 \pm 0.0$ | $1.0\text{E+}4 \pm 21.6$ | $48.2 \pm 0.5$       | $22.6 \pm 0.4$           |
-| 4   | $30.1 \pm 0.0$ | $32.1 \pm 0.0$       | $40.3 \pm 0.0$       | $4.3\text{E+}3 \pm 0.0$ | $1.8\text{E+}4 \pm 41.7$ | $183.4 \pm 5.2$      | $\mathbf{29.7 \pm 0.4}$ |
-| 5   | $51.3 \pm 0.0$ | $50.0 \pm 0.0$       | $52.2 \pm 0.0$       | $9.8\text{E+}3 \pm 0.0$ | $2.7\text{E+}4 \pm 84.4$ | $135.2 \pm 3.1$      | $\mathbf{38.7 \pm 0.4}$ |
-| 6   | $54.7 \pm 0.0$ | $49.2 \pm 0.0$       | $59.1 \pm 0.0$       | $1.2\text{E+}4 \pm 0.0$ | $5.9\text{E+}4 \pm 315.3$ | $358.0 \pm 9.7$      | $\mathbf{4.85 \pm 0.5}$ |
-| 7   | $56.4 \pm 0.0$ | $\mathbf{54.4 \pm 0.0}$ | $70.5 \pm 0.0$       | $2.9\text{E+}4 \pm 0.0$ | $4.4\text{E+}4 \pm 208.1$ | $526.6 \pm 8.7$      | $56.3 \pm 8.2$           |
-| 8   | $\mathbf{59.4 \pm 0.0}$ | $68.0 \pm 0.0$       | $81.4 \pm 0.0$       | $1.7\text{E+}4 \pm 0.0$ | $5.9\text{E+}4 \pm 315.2$ | $868.5 \pm 6.0$      | $65.8 \pm 6.2$           |
-| 9   | $72.7 \pm 0.0$ | $\mathbf{64.4 \pm 0.0}$ | $90.8 \pm 0.0$       | $5.3\text{E+}4 \pm 0.0$ | $1.1\text{E+}5 \pm 2219.7$ | $1304.5 \pm 10.1$   | $75.8 \pm 0.7$           |
-| 10  | $87.7 \pm 0.0$ | $\mathbf{80.1 \pm 0.0}$ | $100.5 \pm 0.0$      | $6.3\text{E+}4 \pm 0.0$ | $1.6\text{E+}5 \pm 852.8$ | $3809.1 \pm 10.4$   | $83.1 \pm 0.7$           |
+## PPO training
 
-### Reentrant-2 [Exponential]
-| Network | $c\mu$         | MW                   | MP                    | FP                     | PPO                     | PPO BC                | PPO WC                 |
-|---------|----------------|----------------------|-----------------------|------------------------|-------------------------|-----------------------|------------------------|
-| 2       | $26.01 \pm 0.00$ | $17.45 \pm 0.00$     | $2.49\text{E+}4 \pm 0.00$ | $\mathbf{1.76 \pm 0.00}$ | $9.04\text{E+}3 \pm 41.13$ | $30.62 \pm 0.37$       | $13.72 \pm 0.22$        |
-| 3       | $26.27 \pm 0.00$ | $26.65 \pm 0.00$     | $4.00\text{E+}4 \pm 0.00$ | $2.12\text{E+}3 \pm 0.00$ | $1.82\text{E+}4 \pm 37.23$ | $48.59 \pm 0.56$       | $\mathbf{22.09 \pm 0.29}$ |
-| 4       | $27.62 \pm 0.00$ | $34.10 \pm 0.00$     | $3.99\text{E+}4 \pm 0.00$ | $5.54\text{E+}3 \pm 0.00$ | $1.77\text{E+}4 \pm 52.30$ | $79.20 \pm 1.06$       | $\mathbf{29.90 \pm 0.47}$ |
-| 5       | $44.82 \pm 0.00$ | $40.34 \pm 0.00$     | $4.99\text{E+}4 \pm 0.00$ | $9.72\text{E+}3 \pm 0.00$ | $2.58\text{E+}4 \pm 63.54$ | $91.65 \pm 1.37$       | $\mathbf{38.01 \pm 0.52}$ |
-| 6       | $\mathbf{54.48 \pm 0.00}$ | $46.63 \pm 0.00$     | $1.00\text{E+}5 \pm 0.00$ | $1.65\text{E+}4 \pm 0.00$ | $4.02\text{E+}4 \pm 349.64$ | $526.57 \pm 8.74$      | $46.80 \pm 0.47$        |
-| 7       | $70.25 \pm 0.00$ | $77.93 \pm 0.00$     | $9.98\text{E+}4 \pm 0.00$ | $1.39\text{E+}4 \pm 0.00$ | $5.78\text{E+}4 \pm 116.92$ | $352.02 \pm 6.68$      | $\mathbf{55.51 \pm 0.57}$ |
-| 8       | $70.32 \pm 0.00$ | $72.96 \pm 0.00$     | $1.00\text{E+}5 \pm 0.00$ | $2.73\text{E+}4 \pm 0.00$ | $4.79\text{E+}4 \pm 208.70$ | $1332.68 \pm 7.82$     | $\mathbf{63.15 \pm 0.70}$ |
-| 9       | $\mathbf{65.80 \pm 0.00}$ | $77.34 \pm 0.00$     | $1.00\text{E+}5 \pm 0.00$ | $6.53\text{E+}4 \pm 0.00$ | $6.54\text{E+}4 \pm 491.49$ | $1574.86 \pm 9.34$     | $70.30 \pm 0.86$        |
-| 10      | $81.35 \pm 0.00$ | $\mathbf{82.00 \pm 0.00}$ | $1.50\text{E+}5 \pm 0.00$ | $9.36\text{E+}4 \pm 0.00$ | $8.11\text{E+}4 \pm 355.34$ | $1876.54 \pm 89.20$    | $80.36 \pm 0.79$        |
+Run the work-conserving PPO baseline with:
 
-### Reentrant-1 [Hyperexponential]
-| L | cμ | MW | MP | FP | PPO | PPO BC | PPO WC | A2C WC |
-|---|---|---|---|---|---|---|---|---|
-| 2 | 31.69 ± 1.3 | **22.40 ± 1.2** | 43.8 ± 1.8 | 43.6 ± 7.5 | 9.9E+3 ± 20.7 | 62.7 ± 1.3 | 29.9 ± 0.7 | 30.2 ± 0.7 |
-| 3 | **36.76 ± 1.9** | 43.00 ± 2.2 | 68.7 ± 2.7 | 59.2 ± 8.2 | 19.6E+3  ± 58.0 | 305.1 ± 13.8 | 47.5 ± 0.8 | 47.8 ± 1.1 |
-| 4 | **58.58 ± 2.5** | 74.54 ± 2.8 | 89.4 ± 3.6 | 75.6 ± 15.3 | 18.9E+3 ± 53.1 | 167.2 ± 5.1 | 64.4 ± 1.2 | 62.8 ± 1.4 |
-| 5 | **68.91 ± 4.0** | 73.19 ± 3.7 | 112.0 ± 4.9 | 97.0 ± 12.9 | 48.0E+3 ± 153.5 | 913.4 ± 19.9 | 81.8 ± 1.1 | 84.9 ± 1.2 |
-| 6 | **85.16 ± 4.7** | 98.75 ± 3.9 | 126.7 ± 6.2 | 111.2 ± 14.4 | 59.1E+3 ± 336.4 | 2383.0 ± 15.2 | 99.8 ± 1.5 | 100.8 ± 1.4 |
-| 7 | **100.24 ± 5.9** | 119.01 ± 3.9 | 152.3 ± 6.6 | 151.0 ± 21.3 | 65.4E+3 ± 325.9 | 3054.6 ± 16.6 | 118.2 ± 2.0 | 120.5 ± 2.1 |
+```bash
+python RL/PPO/train.py WC reentrant_2
+```
 
+The first argument selects `RL/policy_configs/WC.yaml`; the second selects `configs/env/reentrant_2.yaml` and must omit `.yaml`. Other available policy configurations are `vanilla` and `vanilla_bc`:
 
+```bash
+python RL/PPO/train.py vanilla reentrant_2
+python RL/PPO/train.py vanilla_bc reentrant_2
+```
 
+Edit the selected policy YAML to configure the actor architecture, behavior cloning, normalization, learning rates, discount factor, GAE, minibatch size, and PPO optimization epochs. The training budget is `training.num_epochs * training.episode_steps * training.actors` total timesteps. The script performs pre-training evaluation and periodic evaluation using the environment's `test_T`; its evaluation batch size is hard-coded to 400 rather than taken from `training.test_batch`.
 
-### Reentrant-2 [Hyperexponential]
+Outputs go to `RL/PPO/<env_config_name>_PPO/`, including evaluated policies (`policy_eval_000000.pkl`, etc.) and `test_cost_list.json` after training completes. All policy variants for the same environment share this directory, so preserve or rename previous results before running another variant.
 
-| Net | $c\mu$ | MW | MP | FP | PPO | PPO BC | PPO WC |
-|-----|--------|-----|----|----|-----|--------|--------|
-| 2 | $28.43 \pm 1.37$ | $\mathbf{22.82 \pm 1.89}$ | $58.63 \pm 2.26$ | $39.75 \pm 7.29$ | $9.75\text{E+}3 \pm 59.58$ | $66.87 \pm 1.11$ | $30.67 \pm 0.83$ |
-| 3 | $41.46 \pm 2.14$ | $\mathbf{36.97 \pm 2.69}$ | $67.14 \pm 2.94$ | $55.52 \pm 9.38$ | $2.05\text{E+}4 \pm 132.63$ | $482.64 \pm 17.98$ | $45.66 \pm 0.84$ |
-| 4 | $72.87 \pm 2.68$ | $92.73 \pm 3.68$ | $92.96 \pm 4.01$ | $72.09 \pm 14.37$ | $1.93\text{E+}4 \pm 62.07$ | $149.23 \pm 3.17$ | $\mathbf{61.09 \pm 1.30}$ |
-| 5 | $\mathbf{58.65 \pm 2.66}$ | $72.48\pm 3.92$ | $109.03 \pm 5.35$ | $84.17 \pm 18.17$ | $2.56\text{E+}4 \pm 84.23$ | $371.65 \pm 10.81$ | $77.98 \pm 1.73$ |
-| 6 | $\mathbf{85.68 \pm 5.07}$ | $133.80 \pm 4.32$ | $123.60 \pm 5.25$ | $99.51 \pm 15.48$ | $6.71\text{E+}4 \pm 362.68$ | $1363.93 \pm 20.21$ | $93.84 \pm 1.26$ |
-| 7 | $\mathbf{100.24 \pm 5.96}$ | $120.23 \pm 5.06$ | $135.58 \pm 5.99$ | $118.91 \pm 15.67$ | $6.54\text{E+}4 \pm 214.22$ | $2317.88 \pm 15.54$ | $110.48 \pm 1.63$ |
+## Rule-based benchmarks
 
-### Parallel server
-| Network       | $c\mu$               | MW                   | MP                   | FP                   | PPO                      | PPO BC                 | PPO WC                 |
-|---------------|----------------------|----------------------|----------------------|----------------------|--------------------------|------------------------|------------------------|
-| N Model       | $1.7\text{E+}2 \pm 0.0$ | $\mathbf{40.2 \pm 0.0}$ | $\mathbf{40.2 \pm 0.0}$ | $7.9\text{E+}2 \pm 0.0$ | $8.8\text{E+}3 \pm 28.5$ | $100.9 \pm 1.9$       | $44.3 \pm 1.8$         |
-| Five-by-Five (Time-varying)  | $17.8 \pm 0.0$       | $\mathbf{15.2 \pm 0.0}$ | $\mathbf{15.2 \pm 0.0}$ | $26.7 \pm 0.0$         | $1.2\text{E+}4 \pm 15.3$ | $25.2 \pm 0.1$        | $16.8 \pm 0.2$         |
-
-### Real world examples
-| Network       | $c\mu$               | MW                   | MP                   | FP                   | PPO                      | PPO BC                 | PPO WC                 |
-|---------------|----------------------|----------------------|----------------------|----------------------|--------------------------|------------------------|------------------------|
-| Input Switch  | $\mathbf{5.3 \pm 0.0}$ | $5.6 \pm 0.0$        | $4.9\text{E+}3 \pm 0.0$ | $4.9\text{E+}3 \pm 0.0$ | $7.3\text{E+}3 \pm 8.9$  | $11.8 \pm 0.1$         | $\mathbf{5.3 \pm 0.3}$  |
-| Hospital      | $\mathbf{4.4\text{E+}2 \pm 0.0}$ | $\mathbf{4.4\text{E+}2 \pm 0.0}$ | $\mathbf{4.4\text{E+}2 \pm 0.0}$ | $1.5\text{E+}3 \pm 0.0$ | $2.4\text{E+}4 \pm 6.6$ | $2.5\text{E+}4 \pm 7.0$ | $2.3\text{E+}4 \pm 7.4$ |
+For rule-based benchmarks such as c-mu, c-mu-q, MaxPressure, and fluid policies, follow the configuration and execution instructions in the [original QGym repository](https://github.com/namkoong-lab/QGym#how-to-run-experiments). Refer to that repository for the simulator API and general queueing-network setup documentation as well.
