@@ -1,4 +1,4 @@
-"""Actor-only ZO training with one coupled empty-to-empty cycle per policy."""
+"""Actor-only ZO training with coupled empty-to-empty renewal cycles per policy."""
 import copy
 import json
 import math
@@ -219,14 +219,14 @@ def evaluate_packed_trajectory(job):
     """Only baseline evaluations return state across the process boundary."""
     env_config, config, policy, packed, seed, keep_state = job[:6]
     if len(job) > 6:
-        score, state, samples, steps = evaluate_trajectory(
+        score, state, samples, cost, elapsed, steps = evaluate_trajectory(
             (env_config, config, policy, unpack_state(packed), seed),
             return_state=keep_state, sample_count=job[6], sample_seed=job[7])
-        return score, pack_state(state) if keep_state else None, samples, steps
-    score, state, steps = evaluate_trajectory(
+        return score, pack_state(state) if keep_state else None, samples, cost, elapsed, steps
+    score, state, cost, elapsed, steps = evaluate_trajectory(
         (env_config, config, policy, unpack_state(packed), seed),
         return_state=keep_state)
-    return score, pack_state(state) if keep_state else None, steps
+    return score, pack_state(state) if keep_state else None, cost, elapsed, steps
 
 
 def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_seed=0):
@@ -270,7 +270,7 @@ def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_see
     if elapsed <= 0:
         raise RuntimeError('Evaluation must have positive elapsed time')
     result = integral / elapsed, copy.deepcopy(env.env_state) if return_state else None
-    return (*result, samples, step) if sample_count is not None else (*result, step)
+    return (*result, samples, integral, elapsed, step) if sample_count is not None else (*result, integral, elapsed, step)
 
 
 def policy_diagnostics(policies, queues, partitions):
@@ -366,6 +366,9 @@ class ZerothOrderTrainer:
         if not isinstance(self.pretrain_evaluation_enabled, bool):
             raise ValueError('pretrain_evaluation.enabled must be true or false')
         t = self.training
+        self.renewal_cycles = t.get('renewal_cycles', 1)
+        if type(self.renewal_cycles) is not int or self.renewal_cycles <= 0:
+            raise ValueError('training.renewal_cycles must be a positive integer')
         diagnostics = t.get('policy_diagnostics', {})
         if not isinstance(diagnostics.get('enabled', False), bool):
             raise ValueError('policy_diagnostics.enabled must be true or false')
@@ -402,15 +405,26 @@ class ZerothOrderTrainer:
         self.service_rates = env.mu[0].float().clone()
         self.partitions = parameter_partitions(self.policy, t['mode'], t['partition_count'])
         self.generator = torch.Generator().manual_seed(t['perturbation_seed'])
-        # Renewal evaluations use a single fresh common seed per iteration.
-        self.seeds = [config['env']['train_seed']]
-        install_streams(env, self.seeds[0])
-        self.states = [copy.deepcopy(env.env_state)]
+        self.reset_evaluation_cycles(0)
         candidates = 1 if t['mode'] == 'split_vanilla' else len(self.partitions)
         self.workers = min(48, t['max_cpus'], os.cpu_count() or 1,
                            len(self.seeds) * (candidates + 1))
         self.output_dir = Path(output_dir)
         self.output_dir.mkdir(parents=True, exist_ok=False)
+
+    def reset_evaluation_cycles(self, iteration):
+        """Independent cycle seeds, shared by all policies in this iteration."""
+        self.seeds, self.states = [], []
+        for cycle in range(self.renewal_cycles):
+            # Preserve the original one-cycle seed sequence for cycle zero.
+            key = [self.config['env']['train_seed'], iteration]
+            if cycle:
+                key.append(cycle)
+            seed = int(np.random.SeedSequence(key).generate_state(1)[0])
+            env = make_environment(self.env_config, self.config, seed)
+            install_streams(env, seed)
+            self.seeds.append(seed)
+            self.states.append(copy.deepcopy(env.env_state))
 
     def pretrain(self):
         """Uniform integer queues 0..100, queue-length x service-rate teacher, MSE/Adam."""
@@ -466,11 +480,7 @@ class ZerothOrderTrainer:
             for iteration in range(self.training['total_iterations']):
                 label = f"Training iteration {iteration + 1}/{self.training['total_iterations']}"
                 log_progress(f'{label} in progress')
-                self.seeds = [int(np.random.SeedSequence(
-                    [self.config['env']['train_seed'], iteration]).generate_state(1)[0])]
-                initial_env = make_environment(self.env_config, self.config, self.seeds[0])
-                install_streams(initial_env, self.seeds[0])
-                self.states = [copy.deepcopy(initial_env.env_state)]
+                self.reset_evaluation_cycles(iteration)
                 ratio = perturbation_ratio(self.training, iteration)
                 base = parameters_to_vector(self.policy.parameters()).detach().clone()
                 torch.save({'iteration': iteration, 'policy_state_dict': self.policy.state_dict(),
@@ -505,15 +515,20 @@ class ZerothOrderTrainer:
                 if self.diagnostics_enabled:
                     rng = np.random.default_rng(np.random.SeedSequence(
                         [self.training['perturbation_seed'], iteration, 917]))
-                    # Equal trajectory weighting, matching the evaluation objective.
+                    # Diagnostic states are sampled with equal cycle weighting.
+                    # Policy scores below instead use total cost / total time.
                     counts = rng.multinomial(self.diagnostic_samples,
                                              np.full(len(self.seeds), 1 / len(self.seeds)))
                     for i, count in enumerate(counts):
                         jobs[i] = (*jobs[i], int(count), int(rng.integers(2**32)))
                 results = list(pool.map(evaluate_packed_trajectory, jobs)) if pool else list(map(evaluate_packed_trajectory, jobs))
                 n = len(self.seeds)
-                scores = [float(np.mean([r[0] for r in results[i:i+n]]))
-                          for i in range(0, len(results), n)]
+                policy_total_costs = [sum(r[-3] for r in results[i:i+n])
+                                      for i in range(0, len(results), n)]
+                policy_total_times = [sum(r[-2] for r in results[i:i+n])
+                                      for i in range(0, len(results), n)]
+                scores = [cost / elapsed for cost, elapsed in
+                          zip(policy_total_costs, policy_total_times)]
                 if not all(math.isfinite(score) for score in scores):
                     raise RuntimeError('Nonfinite evaluation score')
                 # Keep the empty initial states; completed cycles are not continued.
@@ -530,6 +545,9 @@ class ZerothOrderTrainer:
                 total_sampled_steps = sum(trajectory_steps)
                 cumulative_sampled_steps += total_sampled_steps
                 record = dict(iteration=iteration, perturbation_ratio=ratio,
+                              renewal_cycles=self.renewal_cycles,
+                              policy_total_holding_costs=policy_total_costs,
+                              policy_total_elapsed_times=policy_total_times,
                               trajectory_steps=trajectory_steps,
                               total_sampled_steps=total_sampled_steps,
                               average_trajectory_steps=total_sampled_steps / len(results),
