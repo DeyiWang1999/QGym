@@ -229,8 +229,21 @@ def evaluate_packed_trajectory(job):
     return score, pack_state(state) if keep_state else None, cost, elapsed, steps
 
 
+def renewal_step_cap(config):
+    cap = config['training'].get('renewal_max_steps', 100000)
+    if type(cap) is not int or cap <= 0:
+        raise ValueError('training.renewal_max_steps must be a positive integer')
+    return cap
+
+
 def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_seed=0):
+    """Sample until first return to empty or the configured event cap.
+
+    Capped cycles contribute their observed cost and elapsed time, without
+    extrapolation or continuation into the next independently seeded cycle.
+    """
     env_config, config, policy, initial_state, seed = job
+    max_steps = renewal_step_cap(config)
     torch.set_num_threads(1)
     env = make_environment(env_config, config, seed)
     # Every evaluation starts empty; no residual state carries across cycles.
@@ -246,7 +259,7 @@ def evaluate_trajectory(job, *, return_state=True, sample_count=None, sample_see
     with torch.no_grad():
         step = 0
         has_been_nonempty = False
-        while True:
+        while step < max_steps:
             queues = env.env_state.queues.clone()
             if sample_count:
                 seen += 1
@@ -369,6 +382,7 @@ class ZerothOrderTrainer:
         self.renewal_cycles = t.get('renewal_cycles', 1)
         if type(self.renewal_cycles) is not int or self.renewal_cycles <= 0:
             raise ValueError('training.renewal_cycles must be a positive integer')
+        self.renewal_max_steps = renewal_step_cap(config)
         diagnostics = t.get('policy_diagnostics', {})
         if not isinstance(diagnostics.get('enabled', False), bool):
             raise ValueError('policy_diagnostics.enabled must be true or false')
@@ -546,6 +560,7 @@ class ZerothOrderTrainer:
                 cumulative_sampled_steps += total_sampled_steps
                 record = dict(iteration=iteration, perturbation_ratio=ratio,
                               renewal_cycles=self.renewal_cycles,
+                              renewal_max_steps=self.renewal_max_steps,
                               policy_total_holding_costs=policy_total_costs,
                               policy_total_elapsed_times=policy_total_times,
                               trajectory_steps=trajectory_steps,

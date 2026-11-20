@@ -29,6 +29,7 @@ training:
   perturbation_seed: 100
   partition_count: 2 # Floor-sized partitions; all remaining parameters go in the last.
   renewal_cycles: 1 # ZO_renew only: empty-to-empty cycles per policy; score = total cost / total time.
+  renewal_max_steps: 100000 # ZO_renew only: stop each cycle at this event count if it has not returned empty.
   evaluation_trajectories: 10
   # evaluation_length: 30000 # reentrant-9-split
   # evaluation_length: 135000 # reentrant-9-vanilla
